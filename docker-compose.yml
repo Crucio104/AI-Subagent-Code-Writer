@@ -8,6 +8,7 @@ services:
       - "8000:8000"
     volumes:
       - ./backend:/app
+      - ./workspace:/app/workspace
     environment:
       - PYTHONUNBUFFERED=1
       - RUNNING_IN_DOCKER=true

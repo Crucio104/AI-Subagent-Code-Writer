@@ -189,41 +189,58 @@ class CodeGenerator(Agent):
         error_content = None
         
         try:
-             # Extract Markdown code blocks - support optional language tag
-             code_blocks = re.findall(r'```(?:[a-zA-Z0-9]*)(.*?)```', response_text, re.DOTALL)
-             
-             for block in code_blocks:
-                 content = block.strip()
-                 # Try to find filename
-                 # Supports: # filename: x, // filename: x, <!-- filename: x -->
-                 filename_match = re.search(r'^(?:#|//|<!--)\s*filename:\s*(.+?)(?:-->)?$', content, re.MULTILINE | re.IGNORECASE)
-                 if filename_match:
-                     fname = filename_match.group(1).strip()
-                     files[fname] = content
-                 elif "requirements.txt" in content and "=" not in content and "import" not in content:
-                     files["requirements.txt"] = content
-                 
-             if not files:
-                 if "Failed to generate code" in response_text or "Error:" in response_text:
-                      error_content = f"LLM Error: {response_text}"
-                 else:
-                      # Fallback: if entire response is python code
-                      if "def " in response_text or "import " in response_text:
-                           files["main.py"] = response_text
-                      else:
-                           error_content = "No code blocks found with '# filename:' marker."
+            # Extract Markdown code blocks - support optional language tag
+            code_blocks = re.findall(r'```(?:[a-zA-Z0-9]*)(.*?)```', response_text, re.DOTALL)
+            
+            for block in code_blocks:
+                content = block.strip()
+                # Try to find filename
+                # Supports: # filename: x, // filename: x, <!-- filename: x -->
+                filename_match = re.search(r'^(?:#|//|<!--)\s*filename:\s*(.+?)(?:-->)?$', content, re.MULTILINE | re.IGNORECASE)
+                
+                if filename_match:
+                    fname = filename_match.group(1).strip()
+                    files[fname] = content
+                elif "requirements.txt" in content and "=" not in content and "import" not in content:
+                    files["requirements.txt"] = content
+                else:
+                    # Fallback: Try to guess extension or use default
+                    ext = ".txt"
+                    if "<html>" in content or "</div>" in content:
+                        ext = ".html"
+                    elif "def " in content or "import " in content:
+                        ext = ".py"
+                    elif "{" in content and "}" in content and ";" in content:
+                        ext = ".css" # Rough guess for CSS/JS
+                    
+                    # If this is the first block, maybe it's the main file
+                    if not files:
+                        default_name = f"index{ext}" if ext == ".html" else f"main{ext}"
+                        files[default_name] = content
+
+            if not files:
+                # Last resort fallback: check if the entire response is code without blocks
+                if "def " in response_text or "import " in response_text:
+                    files["main.py"] = response_text
+                elif "<html>" in response_text:
+                    files["index.html"] = response_text
+                else:
+                    if "Failed to generate code" in response_text or "Error:" in response_text:
+                        error_content = f"LLM Error: {response_text}"
+                    else:
+                        error_content = "No code blocks found with '# filename:' marker."
 
         except Exception as e:
-             error_content = f"Parse Error: {e}"
-             files = {"error_log.txt": f"{error_content}\\nRaw: {response_text}"}
+            error_content = f"Parse Error: {e}"
+            files = {"error_log.txt": f"{error_content}\\nRaw: {response_text}"}
 
         if error_content or (not files):
-             # If completely empty and no error, treat as error
-             if not error_content and not files:
-                 error_content = "No files generated."
-             yield AgentResponse(agent_name=self.name, content=f"Error! {error_content}", is_error=True, files=files)
+            # If completely empty and no error, treat as error
+            if not error_content and not files:
+                error_content = "No files generated."
+            yield AgentResponse(agent_name=self.name, content=f"Error! {error_content}", is_error=True, files=files)
         else:
-             yield AgentResponse(
+            yield AgentResponse(
                 agent_name=self.name,
                 content="Done! Code generated successfully.",
                 files=files
@@ -514,8 +531,8 @@ class Orchestrator:
                     if os.path.isabs(filename): 
                         pass
                     
-                    # EPHEMERAL STORAGE: Save to /tmp/agent_workspace
-                    base_dir = "/tmp/agent_workspace"
+                    # PERSISTENT STORAGE: Save to /app/workspace (mounted volume)
+                    base_dir = "/app/workspace"
                     filepath = os.path.join(base_dir, filename) 
                     os.makedirs(os.path.dirname(filepath), exist_ok=True)
                     with open(filepath, "w") as f:

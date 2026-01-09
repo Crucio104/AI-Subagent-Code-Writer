@@ -5,6 +5,14 @@ FROM python:3.11-slim
 WORKDIR /app
 ENV PYTHONPATH=/app
 
+# Smart Terminal: Add custom bashrc
+RUN echo "export PS1='\[\033[01;32m\]\u@agentforge\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '" >> /root/.bashrc && \
+    echo "alias ll='ls -alF'" >> /root/.bashrc && \
+    echo "alias l='ls -CF'" >> /root/.bashrc && \
+    echo "alias pip='pip --no-cache-dir'" >> /root/.bashrc
+
+RUN mkdir -p /app/workspace && chmod 777 /app/workspace
+
 # Copy the requirements file into the container
 COPY requirements.txt .
 

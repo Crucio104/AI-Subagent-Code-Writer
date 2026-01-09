@@ -41,6 +41,54 @@ async def run_script(request: RunRequest):
     except Exception as e:
         return {"error": str(e), "exit_code": -1}
 
+from fastapi.responses import FileResponse
+import zipfile
+import io
+
+from fastapi.staticfiles import StaticFiles
+
+# Mount persistent workspace for live preview
+os.makedirs("/app/workspace", exist_ok=True)
+app.mount("/preview", StaticFiles(directory="/app/workspace", html=True), name="preview")
+
+@app.get("/download-project")
+async def download_project():
+    base_dir = "/app/workspace"
+    if not os.path.exists(base_dir):
+        return {"error": "No project files found."}
+        
+    # Create in-memory zip
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for root, dirs, files in os.walk(base_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                # Compute relative path for zip archive
+                arcname = os.path.relpath(file_path, base_dir)
+                zip_file.write(file_path, arcname)
+                
+    zip_buffer.seek(0)
+    
+    # Save to a temp file
+    with tempfile.NamedTemporaryFile(mode='wb', suffix='.zip', delete=False) as tmp_zip:
+        tmp_zip.write(zip_buffer.getvalue())
+        tmp_zip_path = tmp_zip.name
+
+    return FileResponse(
+        tmp_zip_path, 
+        media_type='application/zip', 
+        filename='project_files.zip',
+        background=asyncio.create_task(cleanup_file(tmp_zip_path))
+    )
+
+async def cleanup_file(path: str):
+    await asyncio.sleep(10) 
+    try:
+        os.unlink(path)
+    except:
+        pass
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -55,9 +103,11 @@ def read_root():
 
 @app.websocket("/generate")
 async def websocket_endpoint(websocket: WebSocket):
+    print("WS: Connection request received for /generate")
     await websocket.accept()
+    print("WS: Connection accepted")
     try:
-        print("Initializing Orchestrator...")
+        print("WS: Initializing Orchestrator...")
         orchestrator = Orchestrator()
         
         data = await websocket.receive_text()
@@ -96,6 +146,9 @@ async def terminal_endpoint(websocket: WebSocket):
         # Create PTY
         master_fd, slave_fd = pty.openpty()
         
+        # Ensure workspace exists
+        os.makedirs("/app/workspace", exist_ok=True)
+
         # Spawn shell
         process = subprocess.Popen(
             ["/bin/bash"],
@@ -103,7 +156,7 @@ async def terminal_endpoint(websocket: WebSocket):
             stdout=slave_fd,
             stderr=slave_fd,
             preexec_fn=os.setsid,
-            cwd="/app", 
+            cwd="/app/workspace",  # Start in persistent workspace
             env={**os.environ, "TERM": "xterm-256color"}
         )
         

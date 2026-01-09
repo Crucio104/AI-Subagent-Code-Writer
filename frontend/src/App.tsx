@@ -11,6 +11,7 @@ import { FileCode, Terminal, MonitorPlay, ArrowRight, Bot, FolderOpen, X, Copy, 
 import { Terminal as XTerminal } from './components/Terminal';
 import type { TerminalRef } from './components/Terminal';
 import { cn } from './lib/utils'
+import { FileExplorer } from './components/FileExplorer';
 
 interface LogItem {
   agent_name: string;
@@ -19,6 +20,29 @@ interface LogItem {
   status: 'done' | 'working' | 'error';
   error?: string;
 }
+
+const socketUrl = 'ws://localhost:8000/generate';
+
+// Helper to convert flat path map to nested tree
+const buildFileTree = (files: { [key: string]: string }) => {
+  const root: any = {};
+  Object.keys(files).forEach(path => {
+    // Clean path (remove leading slash)
+    const cleanPath = path.startsWith('/') ? path.slice(1) : path;
+    const parts = cleanPath.split('/');
+
+    let current = root;
+    parts.forEach((part, index) => {
+      if (index === parts.length - 1) {
+        current[part] = files[path];
+      } else {
+        current[part] = current[part] || {};
+        current = current[part];
+      }
+    });
+  });
+  return root;
+};
 
 function App() {
   const [prompt, setPrompt] = useState('')
@@ -32,29 +56,23 @@ function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const terminalRef = useRef<TerminalRef>(null);
   const lastTestLogLenRef = useRef(0);
+
   useEffect(() => {
-    // Force Dark Mode always
     document.documentElement.classList.add('dark');
     localStorage.setItem('theme', 'dark');
   }, []);
 
-  // Theme toggle removed as requested
-
-  // Resizable Terminal State
   const [openAiKey, setOpenAiKey] = useState('');
   const [showKeyInput, setShowKeyInput] = useState(false);
   const [autoFix, setAutoFix] = useState(false);
-  const [terminalHeight, setTerminalHeight] = useState(192); // Default 192px (12rem/48 class)
+  const [terminalHeight, setTerminalHeight] = useState(192);
 
   // Voice Input Logic
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<any>(null);
 
   const startListening = () => {
-    console.log("startListening called, isListening:", isListening);
-
     if (isListening) {
-      console.log("Stopping recognition...");
       if (recognitionRef.current) {
         recognitionRef.current.stop();
       }
@@ -62,7 +80,6 @@ function App() {
       return;
     }
 
-    console.log("Starting recognition...");
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
       alert("Browser does not support speech recognition. Please use Chrome or Edge.");
       return;
@@ -72,18 +89,12 @@ function App() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const recognition = new SpeechRecognition();
     recognitionRef.current = recognition;
-    recognition.lang = 'it-IT'; // Default to Italian as per user preference
+    recognition.lang = 'it-IT';
     recognition.continuous = false;
     recognition.interimResults = false;
 
-    recognition.onstart = () => {
-      console.log("Recognition onstart fired");
-      setIsListening(true);
-    };
-    recognition.onend = () => {
-      console.log("Recognition onend fired");
-      setIsListening(false);
-    };
+    recognition.onstart = () => setIsListening(true);
+    recognition.onend = () => setIsListening(false);
     recognition.onerror = (event: any) => {
       console.error("Speech recognition error", event.error);
       setIsListening(false);
@@ -94,22 +105,15 @@ function App() {
       }
     };
     recognition.onresult = (event: any) => {
-      console.log("Recognition onresult fired", event);
       const transcript = event.results[0][0].transcript;
-      console.log("Transcript:", transcript);
       setPrompt(prev => prev + (prev ? " " : "") + transcript);
     };
     try {
-      console.log("Calling recognition.start()...");
       recognition.start();
-      console.log("Recognition.start() called successfully");
     } catch (e) {
-      console.error("Error calling recognition.start():", e);
       alert("Errore nell'avvio del riconoscimento vocale: " + e);
     }
   };
-
-
 
   const startGeneration = () => {
     if (!prompt.trim()) return;
@@ -121,11 +125,10 @@ function App() {
 
     if (wsRef.current) wsRef.current.close();
 
-    const ws = new WebSocket('ws://localhost:8000/generate');
+    const ws = new WebSocket(socketUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log('Connected to backend');
       ws.send(JSON.stringify({
         prompt,
         use_local_llm: useLocalLLM,
@@ -136,24 +139,18 @@ function App() {
 
     ws.onerror = (error) => {
       console.error('WebSocket Error:', error);
-      // Try to fetch to see if it's a network issue or WS issue
       fetch('http://127.0.0.1:8000/')
         .then(res => res.json())
         .then(data => alert(`WS Failed but HTTP OK: ${data.message}`))
-        .catch(err => alert(`Fatal: Cannot reach Backend at all (HTTP & WS failed). \n\nDetails: ${err}`));
+        .catch(err => alert(`Fatal: Cannot reach Backend entirely. Details: ${err}`));
       setIsProcessing(false);
     };
 
-    // Reset test log tracking
     lastTestLogLenRef.current = 0;
 
     ws.onmessage = (event) => {
-      // Prevent handling messages from old sockets
       if (ws !== wsRef.current) return;
-
-      console.log('[WebSocket] Message received:', event.data);
       const data = JSON.parse(event.data);
-      console.log('[WebSocket] Parsed data:', data);
 
       if (data.status === 'done') {
         setIsProcessing(false);
@@ -168,7 +165,6 @@ function App() {
         return;
       }
 
-      // Stream Test Results to Terminal
       if (data.agent_name === 'Tester' && data.files && data.files["TEST_RESULTS.log"]) {
         const fullLog = data.files["TEST_RESULTS.log"];
         const newContent = fullLog.slice(lastTestLogLenRef.current);
@@ -176,7 +172,6 @@ function App() {
           const formatted = newContent.replace(/\n/g, '\r\n');
           terminalRef.current?.writeToTerminal(formatted);
           lastTestLogLenRef.current = fullLog.length;
-          // Auto-open handled by TerminalPanel effect
         }
       }
 
@@ -184,16 +179,14 @@ function App() {
         const newTimeline = [...prev];
         const lastItem = newTimeline[newTimeline.length - 1];
 
-        // If clear_history is requested (e.g. starting new auto-fix loop), reset the timeline
         if (data.clear_history) {
           return [{
             agent_name: data.agent_name,
             content: data.content,
-            status: data.is_error ? 'error' as const : 'working' as const
+            status: data.is_error ? 'error' : 'working'
           }];
         }
 
-        // If same agent, update content
         if (lastItem && lastItem.agent_name === data.agent_name && lastItem.status === 'working') {
           lastItem.content = data.content;
           if (data.is_error) {
@@ -204,13 +197,12 @@ function App() {
           return [...newTimeline];
         }
 
-        // If different agent or new start
         return [
           ...prev.map(item => ({ ...item, status: item.status === 'working' ? 'done' as const : item.status })),
           {
             agent_name: data.agent_name,
             content: data.content,
-            status: data.is_error ? 'error' as const : 'working' as const
+            status: data.is_error ? 'error' : 'working'
           }
         ];
       });
@@ -221,17 +213,13 @@ function App() {
         setOpenFiles(prev => Array.from(new Set([...prev, ...newFiles])));
 
         if (newFiles.length > 0) {
-          // Auto-open logic: User specifically requested to open the first generated file.
-          // We force selection of the first file in the new batch.
           setSelectedFile(newFiles[0]);
         }
       }
     };
 
     ws.onclose = () => {
-      // Only handle close if this is the current socket
       if (ws === wsRef.current) {
-        console.log('Connection closed');
         setIsProcessing(false);
         setTimeline(prev => prev.map(item => ({ ...item, status: item.status === 'working' ? 'done' as const : item.status })));
       }
@@ -243,7 +231,6 @@ function App() {
     const newOpen = openFiles.filter(f => f !== filename);
     setOpenFiles(newOpen);
     if (selectedFile === filename) {
-      // Select the last opened file or null
       setSelectedFile(newOpen.length > 0 ? newOpen[newOpen.length - 1] : null);
     }
   };
@@ -277,17 +264,12 @@ function App() {
     setIsRunning(true);
 
     if (terminalRef.current) {
-      // Send Ctrl+C to clear any running process or prompt, then run the file
       terminalRef.current.sendText('\x03');
-
-      // Wait a brief moment for the prompt to reset
       setTimeout(() => {
-        // Execute from the ephemeral workspace
-        // EPHEMERAL STORAGE: Files are in /tmp/agent_workspace, not /app
-        terminalRef.current?.sendText(`python /tmp/agent_workspace/${filename}\r`);
+        // Run from persistent workspace now
+        terminalRef.current?.sendText(`python /app/workspace/${filename}\r`);
       }, 50);
     }
-
     setTimeout(() => setIsRunning(false), 300);
   };
 
@@ -312,13 +294,12 @@ function App() {
       </header>
 
       <div className="flex-1 flex min-h-0">
-        {/* Sidebar - Timeline */}
+        {/* Sidebar */}
         <aside className="w-80 lg:w-96 border-r border-border bg-card flex flex-col shrink-0">
           <div className="p-4 border-b border-border/50">
             <p className="text-xs font-medium text-muted-foreground mb-3 uppercase tracking-wider">New Task</p>
             <div className="space-y-3">
               <div className="flex p-1 bg-muted/50 rounded-2xl relative isolate">
-                {/* Animated Background Indicator */}
                 <div className="absolute inset-1 pointer-events-none">
                   <AnimatePresence>
                     {useLocalLLM ? (
@@ -336,7 +317,6 @@ function App() {
                     )}
                   </AnimatePresence>
                 </div>
-
                 <button
                   onClick={() => setUseLocalLLM(true)}
                   className={cn(
@@ -346,26 +326,11 @@ function App() {
                 >
                   Local LLM
                 </button>
-                <div
-                  className={cn(
-                    "relative z-10 flex-1 flex items-center rounded-xl overflow-hidden transition-all duration-300",
-                    !useLocalLLM ? "text-foreground font-semibold" : "text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  <button
-                    onClick={() => setUseLocalLLM(false)}
-                    className="flex-1 text-xs font-medium py-1.5 h-full text-center hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                  >
+                <div className={cn("relative z-10 flex-1 flex items-center rounded-xl overflow-hidden transition-all duration-300", !useLocalLLM ? "text-foreground font-semibold" : "text-muted-foreground hover:text-foreground")}>
+                  <button onClick={() => setUseLocalLLM(false)} className="flex-1 text-xs font-medium py-1.5 h-full text-center hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                     OpenAI API
                   </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setUseLocalLLM(false);
-                      setShowKeyInput(!showKeyInput);
-                    }}
-                    className="px-2 py-1.5 h-full hover:bg-black/10 dark:hover:bg-white/10 transition-colors border-l border-border/20"
-                  >
+                  <button onClick={(e) => { e.stopPropagation(); setUseLocalLLM(false); setShowKeyInput(!showKeyInput); }} className="px-2 py-1.5 h-full hover:bg-black/10 dark:hover:bg-white/10 transition-colors border-l border-border/20">
                     <ChevronDown className={cn("w-3 h-3 transition-transform", showKeyInput && "rotate-180")} />
                   </button>
                 </div>
@@ -373,21 +338,9 @@ function App() {
 
               <AnimatePresence>
                 {showKeyInput && !useLocalLLM && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: "auto", opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    className="overflow-hidden"
-                  >
+                  <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
                     <div className="pb-2">
-                      <input
-                        type="password"
-                        placeholder="sk-..."
-                        value={openAiKey}
-                        onChange={(e) => setOpenAiKey(e.target.value)}
-                        className="w-full text-xs p-2 rounded-xl bg-muted/30 border border-border/50 focus:outline-none focus:border-primary/50 transition-colors font-mono"
-                      />
-                      <p className="text-[10px] text-muted-foreground mt-1 ml-1">Key is only used for this session.</p>
+                      <input type="password" placeholder="sk-..." value={openAiKey} onChange={(e) => setOpenAiKey(e.target.value)} className="w-full text-xs p-2 rounded-xl bg-muted/30 border border-border/50 focus:outline-none focus:border-primary/50 transition-colors font-mono" />
                     </div>
                   </motion.div>
                 )}
@@ -399,26 +352,12 @@ function App() {
                   placeholder="Describe what you want to build..."
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
-                  disabled={false}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      startGeneration();
-                    }
-                  }}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); startGeneration(); } }}
                 />
                 <button
                   type="button"
-                  onClick={() => {
-                    console.log("Mic button clicked!");
-                    startListening();
-                  }}
-                  className={cn(
-                    "absolute bottom-3 right-3 p-2 rounded-xl transition-all duration-300 z-10 cursor-pointer hover:scale-110 active:scale-95",
-                    isListening
-                      ? "bg-red-500/20 text-red-500 animate-pulse"
-                      : "bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground"
-                  )}
+                  onClick={startListening}
+                  className={cn("absolute bottom-3 right-3 p-2 rounded-xl transition-all duration-300 z-10 cursor-pointer hover:scale-110 active:scale-95", isListening ? "bg-red-500/20 text-red-500 animate-pulse" : "bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground")}
                   title="Voice Input"
                 >
                   {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
@@ -426,47 +365,21 @@ function App() {
               </div>
 
               <div className="flex items-center justify-between gap-3">
-                <button
-                  onClick={() => setAutoFix(!autoFix)}
-                  className={cn(
-                    "group flex items-center gap-2.5 px-4 py-2.5 rounded-xl text-xs font-semibold transition-all duration-300 border",
-                    autoFix
-                      ? "bg-primary text-primary-foreground border-primary shadow-[0_4px_12px_rgba(var(--primary),0.25)] hover:shadow-[0_4px_16px_rgba(var(--primary),0.4)]"
-                      : "bg-muted/40 text-muted-foreground border-border/50 hover:bg-muted/60 hover:text-foreground hover:border-border"
-                  )}
-                >
+                <button onClick={() => setAutoFix(!autoFix)} className={cn("group flex items-center gap-2.5 px-4 py-2.5 rounded-xl text-xs font-semibold transition-all duration-300 border", autoFix ? "bg-primary text-primary-foreground border-primary shadow-[0_4px_12px_rgba(var(--primary),0.25)] hover:shadow-[0_4px_16px_rgba(var(--primary),0.4)]" : "bg-muted/40 text-muted-foreground border-border/50 hover:bg-muted/60 hover:text-foreground hover:border-border")}>
                   <RefreshCw className={cn("w-3.5 h-3.5 transition-transform duration-500", autoFix ? "rotate-180" : "group-hover:rotate-90")} />
                   <span>Auto-Fix Loop</span>
                 </button>
-
-                <span className={cn(
-                  "text-[10px] font-medium uppercase tracking-wider transition-colors duration-300",
-                  autoFix ? "text-primary" : "text-muted-foreground/50"
-                )}>
+                <span className={cn("text-[10px] font-medium uppercase tracking-wider transition-colors duration-300", autoFix ? "text-primary" : "text-muted-foreground/50")}>
                   {autoFix ? "Retry Enabled" : "Single Pass"}
                 </span>
               </div>
               <div className="flex gap-2">
-                <Button
-                  className="flex-1 justify-between group transition-colors"
-                  onClick={startGeneration}
-                  disabled={!prompt}
-                >
+                <Button className="flex-1 justify-between group transition-colors" onClick={startGeneration} disabled={!prompt}>
                   <span>{isProcessing ? "Restart Generation" : "Generate Code"}</span>
                   <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
                 </Button>
-
                 {isProcessing && (
-                  <Button
-                    variant="destructive"
-                    size="icon"
-                    className="aspect-square rounded-xl"
-                    onClick={() => {
-                      if (wsRef.current) wsRef.current.close();
-                      setIsProcessing(false);
-                    }}
-                    title="Stop Generation"
-                  >
+                  <Button variant="destructive" size="icon" className="aspect-square rounded-xl" onClick={() => { if (wsRef.current) wsRef.current.close(); setIsProcessing(false); }} title="Stop Generation">
                     <X className="w-4 h-4" />
                   </Button>
                 )}
@@ -474,57 +387,28 @@ function App() {
             </div>
           </div>
 
-          {/* Sidebar Tabs - Premium Segmented Control */}
           <div className="px-4 py-3 border-b border-border/40 bg-muted/10">
             <div className="flex p-1 bg-muted/50 rounded-2xl relative isolate">
-              {/* Animated Background Indicator */}
               <div className="absolute inset-1 pointer-events-none">
                 <AnimatePresence>
                   {sidebarTab === 'activity' ? (
-                    <motion.div
-                      layoutId="sidebar-tab-indicator"
-                      className="absolute left-0 top-0 bottom-0 w-1/2 bg-secondary/80 shadow-sm rounded-xl border border-border/50"
-                      transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                    />
+                    <motion.div layoutId="sidebar-tab-indicator" className="absolute left-0 top-0 bottom-0 w-1/2 bg-secondary/80 shadow-sm rounded-xl border border-border/50" transition={{ type: "spring", stiffness: 500, damping: 30 }} />
                   ) : (
-                    <motion.div
-                      layoutId="sidebar-tab-indicator"
-                      className="absolute right-0 top-0 bottom-0 w-1/2 bg-secondary/80 shadow-sm rounded-xl border border-border/50"
-                      transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                    />
+                    <motion.div layoutId="sidebar-tab-indicator" className="absolute right-0 top-0 bottom-0 w-1/2 bg-secondary/80 shadow-sm rounded-xl border border-border/50" transition={{ type: "spring", stiffness: 500, damping: 30 }} />
                   )}
                 </AnimatePresence>
               </div>
-
-              <button
-                onClick={() => setSidebarTab('activity')}
-                className={cn(
-                  "relative z-10 flex-1 py-2.5 text-xs font-semibold uppercase tracking-wider flex items-center justify-center gap-2 rounded-xl transition-colors duration-200",
-                  sidebarTab === 'activity'
-                    ? "text-foreground font-semibold"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-              >
+              <button onClick={() => setSidebarTab('activity')} className={cn("relative z-10 flex-1 py-2.5 text-xs font-semibold uppercase tracking-wider flex items-center justify-center gap-2 rounded-xl transition-colors duration-200", sidebarTab === 'activity' ? "text-foreground font-semibold" : "text-muted-foreground hover:text-foreground")}>
                 <Bot className={cn("w-4 h-4", sidebarTab === 'activity' ? "text-foreground" : "opacity-70")} />
                 Activity
               </button>
-
-              <button
-                onClick={() => setSidebarTab('files')}
-                className={cn(
-                  "relative z-10 flex-1 py-2.5 text-xs font-semibold uppercase tracking-wider flex items-center justify-center gap-2 rounded-xl transition-colors duration-200",
-                  sidebarTab === 'files'
-                    ? "text-foreground font-semibold"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-              >
+              <button onClick={() => setSidebarTab('files')} className={cn("relative z-10 flex-1 py-2.5 text-xs font-semibold uppercase tracking-wider flex items-center justify-center gap-2 rounded-xl transition-colors duration-200", sidebarTab === 'files' ? "text-foreground font-semibold" : "text-muted-foreground hover:text-foreground")}>
                 <FolderOpen className={cn("w-4 h-4", sidebarTab === 'files' ? "text-foreground" : "opacity-70")} />
                 Files
               </button>
             </div>
           </div>
 
-          {/* Sidebar Content */}
           <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
             {sidebarTab === 'activity' ? (
               <div className="flex-1 min-h-0">
@@ -532,89 +416,65 @@ function App() {
               </div>
             ) : (
               <div className="flex-1 overflow-auto p-4 space-y-1 custom-scrollbar">
+                {Object.keys(generatedFiles).length > 0 && (
+                  <div className="mb-4">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full gap-2 border-primary/20 hover:bg-primary/10 hover:text-primary transition-colors"
+                      onClick={() => {
+                        const link = document.createElement('a');
+                        link.href = 'http://localhost:8000/download-project';
+                        link.download = 'project_files.zip';
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                      }}
+                    >
+                      <Download className="w-4 h-4" />
+                      Download Project (.zip)
+                    </Button>
+                  </div>
+                )}
+
                 {Object.keys(generatedFiles).length === 0 ? (
                   <div className="text-center text-muted-foreground text-sm py-10 flex flex-col items-center gap-2">
                     <FolderOpen className="w-8 h-8 opacity-20" />
                     <span>No files generated yet.</span>
                   </div>
                 ) : (
-                  Object.keys(generatedFiles).map((filename) => (
-                    <div
-                      key={filename}
-                      className={cn(
-                        "w-full rounded-xl text-sm transition-all flex items-center gap-2 group pr-2 relative overflow-hidden",
-                        selectedFile === filename
-                          ? "text-foreground font-semibold"
-                          : "text-muted-foreground hover:text-foreground"
-                      )}
-                    >
-                      {selectedFile === filename && (
-                        <motion.div
-                          layoutId="active-sidebar-file"
-                          className="absolute inset-0 bg-secondary/80 rounded-xl shadow-sm z-0 border border-border/50"
-                          transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                        />
-                      )}
-                      <button
-                        onClick={() => {
-                          if (!openFiles.includes(filename)) {
-                            setOpenFiles(prev => [...prev, filename]);
-                          }
-                          setSelectedFile(filename);
-                        }}
-                        className="flex-1 text-left px-3 py-2.5 flex items-center gap-3 z-0"
-                      >
-                        <FileCode className={cn("w-4 h-4 shrink-0", selectedFile === filename ? "opacity-100 text-foreground" : "opacity-70 group-hover:opacity-100")} />
-                        <span className="truncate font-medium">{filename}</span>
-                      </button>
+                  <FileExplorer
+                    files={buildFileTree(generatedFiles)}
+                    onFileSelect={(path) => {
+                      console.log('onFileSelect called with:', path);
+                      const fullPathKey = Object.keys(generatedFiles).find(k => {
+                        const match = k.endsWith(path) || k === path || path.endsWith(k);
+                        if (match) console.log('Matched key:', k);
+                        return match;
+                      });
 
-                      {/* Sidebar Actions */}
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10 shrink-0">
-                        <button
-                          onClick={(e) => handleCopy(e, filename, generatedFiles[filename])}
-                          className={cn(
-                            "p-1.5 rounded-lg transition-colors",
-                            selectedFile === filename
-                              ? "hover:bg-background/20 text-foreground"
-                              : "hover:bg-background text-muted-foreground hover:text-foreground"
-                          )}
-                          title="Copy content"
-                        >
-                          {copiedFile === filename ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                        </button>
-                        <button
-                          onClick={(e) => handleDownload(e, filename, generatedFiles[filename])}
-                          className={cn(
-                            "p-1.5 rounded-lg transition-colors",
-                            selectedFile === filename
-                              ? "hover:bg-background/20 text-foreground"
-                              : "hover:bg-background text-muted-foreground hover:text-foreground"
-                          )}
-                          title="Download file"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))
+                      if (fullPathKey) {
+                        setSelectedFile(fullPathKey);
+                        if (!openFiles.includes(fullPathKey)) {
+                          setOpenFiles(prev => [...prev, fullPathKey]);
+                        }
+                      } else {
+                        console.warn('No match found for path:', path, 'in keys:', Object.keys(generatedFiles));
+                      }
+                    }}
+                  />
                 )}
               </div>
             )}
           </div>
         </aside>
 
-        {/* Main Content - Code View */}
+        {/* Main Content */}
         <main className="flex-1 bg-muted/10 flex flex-col min-w-0">
-          {/* Header showing selected file */}
           <div className="h-12 border-b border-border bg-background flex items-center px-4 gap-2 overflow-x-auto scrollbar-hide shrink-0">
             <AnimatePresence initial={false} mode="popLayout">
               {openFiles.length === 0 ? (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  className="text-xs text-muted-foreground flex items-center gap-2 px-2"
-                >
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="text-xs text-muted-foreground flex items-center gap-2 px-2">
                   <Terminal className="w-3.5 h-3.5" />
                   Output Terminal
                 </motion.div>
@@ -628,31 +488,16 @@ function App() {
                     transition={{ type: "spring", stiffness: 500, damping: 30 }}
                     key={filename}
                     onClick={() => setSelectedFile(filename)}
-                    className={cn(
-                      "h-8 pl-3 pr-1.5 text-xs font-medium rounded-xl flex items-center gap-2 transition-all shrink-0 group relative hover:text-foreground",
-                      selectedFile === filename
-                        ? "text-foreground font-semibold"
-                        : "text-muted-foreground"
-                    )}
+                    className={cn("h-8 pl-3 pr-1.5 text-xs font-medium rounded-xl flex items-center gap-2 transition-all shrink-0 group relative hover:text-foreground", selectedFile === filename ? "text-foreground font-semibold" : "text-muted-foreground")}
                   >
                     {selectedFile === filename && (
-                      <motion.div
-                        layoutId="active-file-tab"
-                        className="absolute inset-0 bg-secondary/80 rounded-xl shadow-sm z-0 border border-border/50"
-                        transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                      />
+                      <motion.div layoutId="active-file-tab" className="absolute inset-0 bg-secondary/80 rounded-xl shadow-sm z-0 border border-border/50" transition={{ type: "spring", stiffness: 500, damping: 30 }} />
                     )}
                     <span className="relative z-10 flex items-center gap-2">
                       <FileCode className="w-3.5 h-3.5" />
                       <span>{filename}</span>
                     </span>
-                    <div
-                      onClick={(e) => closeFile(e, filename)}
-                      className={cn(
-                        "relative z-10 p-0.5 rounded-full hover:bg-black/20 transition-colors opacity-0 group-hover:opacity-100",
-                        selectedFile === filename && "opacity-100 hover:bg-white/20"
-                      )}
-                    >
+                    <div onClick={(e) => closeFile(e, filename)} className={cn("relative z-10 p-0.5 rounded-full hover:bg-black/20 transition-colors opacity-0 group-hover:opacity-100", selectedFile === filename && "opacity-100 hover:bg-white/20")}>
                       <X className="w-3 h-3" />
                     </div>
                   </motion.button>
@@ -661,55 +506,38 @@ function App() {
             </AnimatePresence>
           </div>
 
-          {/* Editor Area */}
           <div className="flex-1 overflow-auto relative bg-background custom-scrollbar">
             {selectedFile ? (
               <div className="min-h-full">
                 <div className="sticky top-0 z-10 bg-background/95 backdrop-blur border-b border-border/40 px-6 py-2 flex items-center justify-between">
                   <span className="text-xs text-muted-foreground font-mono">{selectedFile}</span>
                   <div className="flex items-center gap-2">
-                    <button
-                      onClick={(e) => handleCopy(e, selectedFile, generatedFiles[selectedFile])}
-                      className="p-1.5 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors"
-                      title="Copy content"
-                    >
+                    <button onClick={(e) => handleCopy(e, selectedFile, generatedFiles[selectedFile])} className="p-1.5 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors" title="Copy content">
                       {copiedFile === selectedFile ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
                     </button>
-                    <button
-                      onClick={(e) => handleDownload(e, selectedFile, generatedFiles[selectedFile])}
-                      className="p-1.5 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors"
-                      title="Download file"
-                    >
+                    <button onClick={(e) => handleDownload(e, selectedFile, generatedFiles[selectedFile])} className="p-1.5 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors" title="Download file">
                       <Download className="w-3.5 h-3.5" />
                     </button>
                     {selectedFile.endsWith('.py') && (
-                      <button
-                        onClick={(e) => handleRun(e, selectedFile)}
-                        className={cn(
-                          "p-1.5 hover:bg-emerald-500/10 rounded-md text-muted-foreground hover:text-emerald-500 transition-colors",
-                          isRunning && "animate-pulse text-emerald-500"
-                        )}
-                        title="Run Python Script"
-                        disabled={isRunning}
-                      >
+                      <button onClick={(e) => handleRun(e, selectedFile)} className={cn("p-1.5 hover:bg-emerald-500/10 rounded-md text-muted-foreground hover:text-emerald-500 transition-colors", isRunning && "animate-pulse text-emerald-500")} title="Run Python Script" disabled={isRunning}>
                         <Play className="w-3.5 h-3.5 fill-current" />
                       </button>
                     )}
                   </div>
                 </div>
-                {selectedFile!.endsWith('.md') ? (
+                {selectedFile.endsWith('.md') ? (
                   <div className="p-6 markdown-body text-sm bg-transparent">
-                    <ReactMarkdown>{generatedFiles[selectedFile!] || ''}</ReactMarkdown>
+                    <ReactMarkdown>{generatedFiles[selectedFile] || ''}</ReactMarkdown>
                   </div>
                 ) : (
                   <div className="text-sm font-mono leading-relaxed overflow-hidden h-full">
                     <SyntaxHighlighter
-                      language={selectedFile!.endsWith('.py') ? 'python' : selectedFile!.endsWith('.tsx') ? 'tsx' : selectedFile!.endsWith('.ts') ? 'typescript' : selectedFile!.endsWith('.css') ? 'css' : 'javascript'}
+                      language={selectedFile.endsWith('.py') ? 'python' : selectedFile.endsWith('.tsx') ? 'tsx' : selectedFile.endsWith('.ts') ? 'typescript' : selectedFile.endsWith('.css') ? 'css' : 'javascript'}
                       style={vscDarkPlus}
                       customStyle={{ margin: 0, borderRadius: 0, height: '100%', background: 'transparent', padding: '1.5rem' }}
                       showLineNumbers={true}
                     >
-                      {generatedFiles[selectedFile!] || ''}
+                      {generatedFiles[selectedFile] || ''}
                     </SyntaxHighlighter>
                   </div>
                 )}
@@ -724,9 +552,6 @@ function App() {
             )}
           </div>
 
-          {/* Terminal Panel */}
-          {/* Resizable Terminal */}
-          {/* Persistent System Terminal */}
           <TerminalPanel
             title="System Terminal"
             onClose={() => { }}
@@ -804,7 +629,6 @@ function TerminalPanel({ title, height, onHeightChange, isRunOutput, xtermRef, o
 
   return (
     <>
-      {/* Resize Handle - Only show if not minimized */}
       {!isMinimized && (
         <div
           className="h-1 bg-border hover:bg-primary/50 cursor-row-resize transition-colors z-20 relative"
@@ -820,7 +644,6 @@ function TerminalPanel({ title, height, onHeightChange, isRunOutput, xtermRef, o
           isRunOutput ? "text-emerald-400" : "text-green-400"
         )}
       >
-        {/* Resize Overlay: Prevents terminal from swallowing mouse events during drag */}
         {isResizing && (
           <div className="absolute inset-0 z-50 cursor-row-resize" />
         )}
@@ -866,7 +689,6 @@ function TerminalPanel({ title, height, onHeightChange, isRunOutput, xtermRef, o
           </div>
         </div>
 
-        {/* Terminal Content */}
         <div
           ref={scrollRef}
           className="flex-1 overflow-hidden relative bg-black custom-scrollbar"
