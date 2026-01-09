@@ -1,5 +1,6 @@
 import os
 import json
+import sys
 import asyncio
 from typing import List, Dict, Optional, AsyncGenerator
 from pydantic import BaseModel
@@ -33,6 +34,7 @@ class AgentResponse(BaseModel):
     internal_output: Optional[str] = None
     files: Optional[Dict[str, str]] = None
     is_error: bool = False
+    clear_history: bool = False
 
 
 class Agent:
@@ -82,7 +84,9 @@ class Agent:
                     )
                     return response.choices[0].message.content
                 except Exception as e:
-                    print(f"[{self.name}] LLM Error (Attempt {attempt+1}/3): {e}")
+                    import traceback
+                    print(f"[{self.name}] LLM Error (Attempt {attempt+1}/3): {repr(e)}")
+                    # traceback.print_exc() # detailed trace
                     if attempt == 2:
                         return self.mock_fallback(user_prompt)
                     await asyncio.sleep(2)
@@ -92,7 +96,8 @@ class Agent:
             return self.mock_fallback(user_prompt)
 
     def mock_fallback(self, user_prompt: str) -> str:
-        return f"Simulation: Processed '{user_prompt}' (LLM Unavailable)"
+        # Return invalid JSON to trigger error handling in process()
+        return "Error: LLM Failed to generate code."
 
     async def process(self, input_data: str, previous_context: Dict) -> AsyncGenerator[AgentResponse, None]:
         raise NotImplementedError
@@ -141,10 +146,8 @@ class CodeGenerator(Agent):
         super().__init__("Code Generator", "Generate code")
 
     def mock_fallback(self, user_prompt: str) -> str:
-        return json.dumps({
-            "main.py": "print('Fallback code')",
-            "README.md": "# Fallback"
-        })
+        # Return invalid JSON to trigger error handling in process()
+        return "Error: LLM Failed to generate code."
 
     async def process(self, input_data: str, previous_context: Dict) -> AsyncGenerator[AgentResponse, None]:
         yield AgentResponse(agent_name=self.name, content="Generating application code (this may take a moment)...")
@@ -157,34 +160,62 @@ class CodeGenerator(Agent):
         2. PRIORITY 2: Efficiency. Optimize only after ensuring correctness.
         3. Follow the User's specific logic and requirements STRICTLY. 
         4. Do not improvise if the user gave specific instructions for the code.
-        5. Return ONLY a valid JSON object where keys are filenames (e.g., "main.py") and values are the file content.
+        5. Return the code using Markdown code blocks.
+           - Start each file with a comment line specifying the filename: `# filename: main.py` or `# filename: requirements.txt`.
+           - Example:
+             ```python
+             # filename: main.py
+             import os
+             print("Hello")
+             ```
+        6. MANDATORY: If the code uses external libraries (e.g., `requests`, `pandas`), YOU MUST GENERATE A `requirements.txt` FILE.
         """
         
         config = previous_context.get("config")
-        full_prompt = f"User Request: {input_data}\n\nArchitect's Plan: {previous_context.get('architect_plan', '')}"
+        full_prompt = f"User Request: {input_data}\\n\\nArchitect's Plan: {previous_context.get('architect_plan', '')}"
         
         response_text = await self.call_llm(system_prompt, full_prompt, config)
         
         import re
-        response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
+        response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
         
         files = {}
         error_content = None
+        
         try:
-            start_index = response_text.find('{')
-            end_index = response_text.rfind('}')
-            if start_index != -1 and end_index != -1 and end_index > start_index:
-                json_str = response_text[start_index : end_index + 1]
-                files = json.loads(json_str)
-            else:
-                 error_content = f"Failed to generate JSON. Raw: {response_text[:200]}..."
-                 files = {"error_log.txt": error_content}
-        except Exception as e:
-             error_content = f"JSON Parse Error: {e}"
-             files = {"error_log.txt": f"{error_content}\nRaw: {response_text}"}
+             # Extract Markdown code blocks - support optional language tag
+             code_blocks = re.findall(r'```(?:[a-zA-Z0-9]*)(.*?)```', response_text, re.DOTALL)
+             
+             for block in code_blocks:
+                 content = block.strip()
+                 # Try to find filename
+                 # Supports: # filename: x, // filename: x, <!-- filename: x -->
+                 filename_match = re.search(r'^(?:#|//|<!--)\s*filename:\s*(.+?)(?:-->)?$', content, re.MULTILINE | re.IGNORECASE)
+                 if filename_match:
+                     fname = filename_match.group(1).strip()
+                     files[fname] = content
+                 elif "requirements.txt" in content and "=" not in content and "import" not in content:
+                     files["requirements.txt"] = content
+                 
+             if not files:
+                 if "Failed to generate code" in response_text or "Error:" in response_text:
+                      error_content = f"LLM Error: {response_text}"
+                 else:
+                      # Fallback: if entire response is python code
+                      if "def " in response_text or "import " in response_text:
+                           files["main.py"] = response_text
+                      else:
+                           error_content = "No code blocks found with '# filename:' marker."
 
-        if error_content:
-             yield AgentResponse(agent_name=self.name, content=f"Error! {error_content}", is_error=True)
+        except Exception as e:
+             error_content = f"Parse Error: {e}"
+             files = {"error_log.txt": f"{error_content}\\nRaw: {response_text}"}
+
+        if error_content or (not files):
+             # If completely empty and no error, treat as error
+             if not error_content and not files:
+                 error_content = "No files generated."
+             yield AgentResponse(agent_name=self.name, content=f"Error! {error_content}", is_error=True, files=files)
         else:
              yield AgentResponse(
                 agent_name=self.name,
@@ -204,26 +235,60 @@ class Tester(Agent):
         Your goal is to write a robust Python test suite using `pytest`.
         
         CRITICAL INSTRUCTIONS:
-        1. Analyze the CODE content and FILE STRUCTURE.
-           - If `main.py` DOES NOT have a `def main():`, DO NOT try `from main import main`.
-           - If `main.py` is inside a folder (e.g., `src/main.py`), use that relative path in `subprocess.run` (e.g., `['python', 'src/main.py']`).
-           - If `main.py` is at root, use `['python', 'main.py']`.
-        2. You MUST generate at least one test file (e.g., `tests/test_main.py`).
-        3. The test content MUST be valid Python code.
-        4. Return ONLY a valid JSON object where keys are filenames and values are the file content.
-           - Do NOT wrap the JSON in Markdown code blocks (no ```json).
+        1. ANALYZE IMPORTS FIRST:
+           - Look at the provided code. Where is the function you are testing defined?
+           - If `merge_sort` is in `utils.py`, your test MUST say `from utils import merge_sort`.
+           - If it is in `main.py`, say `from main import merge_sort`.
+           - DO NOT assume `main.py` unless you see the function defined there.
         
-        Example (Script Test):
-        {
-          "tests/test_main.py": "import subprocess\\nimport sys\\nimport os\\nimport pytest\\n\\ndef test_script_execution():\\n    # Detect if main.py is in src or root\\n    script_path = 'src/main.py' if os.path.exists('src/main.py') else 'main.py'\\n    if not os.path.exists(script_path):\\n        pytest.skip(f'{script_path} not found')\\n    result = subprocess.run([sys.executable, script_path], capture_output=True, text=True)\\n    assert result.returncode == 0"
-        }
+        2. FILE STRUCTURE ANALYSIS:
+           - If `main.py` DOES NOT have a `def main():`, DO NOT try `from main import main`.
+           - If testing a script via subprocess, make sure you use the correct filename (e.g., `subprocess.run(['python', 'utils.py'])` if that's where the code is).
+           
+        3. You MUST generate at least one test file (e.g., `tests/test_main.py`).
+        4. The test content MUST be valid Python code.
+           - MANDATORY: Add this snippet at the very top of your test file to allow running it directly:
+             ```python
+             import sys
+             import os
+             sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+             ```
+        5. Return the test files using Markdown code blocks.
+           - Start each file with a comment line specifying the filename: `# filename: tests/test_mytest.py`.
+           - Example:
+             ```python
+             # filename: tests/test_sorting.py
+             import sys
+             import os
+             sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+             
+             import pytest
+             from utils import merge_sort 
+             ```
+             
+        6. CRITICAL: ROBUST OUTPUT PARSING.
+           - STOP! DO NOT USE `result.stdout.splitlines()[0]` OR `line.split(':')[1]`.
+           - THIS IS FORBIDDEN: `original_line = result.stdout.split('\\n')[0].strip()`
+           - THIS IS FORBIDDEN: `sorted_line = result.stdout.split('\\n')[1].strip()`
+           - INSTEAD, USE REGEX TO SCAN THE WHOLE STRING.
+           - `re.findall(r'-?\\d+', result.stdout)` will find all numbers regardless of where they are.
+           - Example Strategy:
+             ```python
+             # Extract ALL numbers from the entire output at once
+             all_nums = [int(x) for x in re.findall(r'-?\\d+', result.stdout)]
+             # If you expect two arrays of size 100, you have 200 numbers.
+             assert len(all_nums) >= 200
+             # Slice them
+             original_array = all_nums[:100]
+             sorted_array = all_nums[100:200]
+             ```
         """
         
         files = previous_context.get("files", {})
         code_context = "\n".join([f"Process File ({k}):\n{v}" for k, v in files.items()])
         
         if not code_context:
-            yield AgentResponse(agent_name=self.name, content="Done! (No Python files to test)", files={})
+            yield AgentResponse(agent_name=self.name, content="Done! (No Python files to test)", files={}, is_error=True)
             return
 
         config = previous_context.get("config")
@@ -234,14 +299,27 @@ class Tester(Agent):
 
         test_files = {}
         try:
-            start_index = response_text.find('{')
-            end_index = response_text.rfind('}')
-            if start_index != -1 and end_index != -1 and end_index > start_index:
-                test_files = json.loads(response_text[start_index : end_index + 1])
-        except:
-             pass 
-        if not test_files and "def test_" in response_text:
-             test_files = {"tests/test_generated.py": response_text}
+             # Extract Markdown code blocks
+             import re
+             code_blocks = re.findall(r'```python(.*?)```', response_text, re.DOTALL)
+             
+             for block in code_blocks:
+                 content = block.strip()
+                 # Try to find filename in the first few lines
+                 filename_match = re.search(r'^#\s*filename:\s*(.+)$', content, re.MULTILINE)
+                 if filename_match:
+                     fname = filename_match.group(1).strip()
+                     test_files[fname] = content
+                 else:
+                     test_files["tests/test_generated.py"] = content
+
+             # Fallback if no blocks found but looks like code
+             if not test_files and "def test_" in response_text:
+                  test_files = {"tests/test_generated.py": response_text}
+        except Exception as e:
+             print(f"Error parsing test blocks: {e}")
+             if "def test_" in response_text:
+                  test_files = {"tests/test_fallback.py": response_text}
 
         if not test_files:
              test_files = {
@@ -273,10 +351,39 @@ class Tester(Agent):
             
             with tempfile.TemporaryDirectory() as temp_dir:
                 for fname, fcontent in {**files, **test_files}.items():
+                    # Skip direct directory entries (often hallucinated by LLM)
+                    if fname.endswith('/') or fname.endswith('\\'):
+                        continue
+                        
                     fpath = os.path.join(temp_dir, fname)
-                    os.makedirs(os.path.dirname(fpath), exist_ok=True)
-                    with open(fpath, "w") as f:
-                        f.write(fcontent)
+                    try:
+                        os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                        with open(fpath, "w") as f:
+                            f.write(fcontent)
+                    except IsADirectoryError:
+                         # This happens if the LLM output a filename that is actually a directory path
+                         # e.g. "models/"
+                         pass
+                    except Exception as e:
+                         print(f"Warning: Failed to write temporary file {fname}: {e}")
+
+                # Install dependencies if requirements.txt exists
+                if "requirements.txt" in files:
+                    yield AgentResponse(agent_name=self.name, content="Installing dependencies from requirements.txt...")
+                    try:
+                        # Use pip to install dependencies
+                        install_proc = subprocess.run(
+                            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                            cwd=temp_dir,
+                            capture_output=True,
+                            text=True
+                        )
+                        if install_proc.returncode != 0:
+                             yield AgentResponse(agent_name=self.name, content=f"Dependency Installation Warning:\n{install_proc.stderr}", is_error=True)
+                        else:
+                             yield AgentResponse(agent_name=self.name, content="Dependencies installed successfully.")
+                    except Exception as e:
+                         yield AgentResponse(agent_name=self.name, content=f"Warning: Failed to attempt dependency installation: {e}", is_error=True)
                 
                 yield AgentResponse(agent_name=self.name, content="Running pytest (Streaming)...", files=final_files)
                 
@@ -393,6 +500,24 @@ class Orchestrator:
         self.reviewer = CodeReviewer()
         self.writer = TechnicalWriter()
 
+    async def save_to_disk(self, files: Dict[str, str]) -> AsyncGenerator[AgentResponse, None]:
+        try:
+            for filename, content in files.items():
+                if not filename.endswith('.log'):
+                     # Handle subdirectories
+                    if os.path.isabs(filename): 
+                        pass
+                    
+                    # EPHEMERAL STORAGE: Save to /tmp/agent_workspace
+                    base_dir = "/tmp/agent_workspace"
+                    filepath = os.path.join(base_dir, filename) 
+                    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                    with open(filepath, "w") as f:
+                        f.write(content)
+            yield AgentResponse(agent_name="System", content="Files saved to temporary workspace (ready for run).")
+        except Exception as e:
+            yield AgentResponse(agent_name="System", content=f"Warning: Failed to save files to workspace: {e}", is_error=True)
+
     async def run_workflow(self, user_prompt: str, config: Optional[Dict] = None):
         config = config or {}
         auto_fix = config.get("auto_fix", False)
@@ -410,32 +535,59 @@ class Orchestrator:
 
         # --- Single Pass Mode ---
         if not auto_fix:
+            print("[Orchestrator] Entering Single Pass Mode")
             yield AgentResponse(agent_name="System", content="Starting Workflow...")
             
             # 1. Architect
+            print("[Orchestrator] Starting Architect...")
             async for res in run_agent(self.architect): yield res
             last_arch = results.get(self.architect.name)
             if last_arch and last_arch.internal_output:
                 context["architect_plan"] = last_arch.internal_output
+            print("[Orchestrator] Architect Done.")
 
             # 2. Generator
+            print("[Orchestrator] Starting Generator...")
             async for res in run_agent(self.generator): 
                 yield res
                 if res.files: context["files"].update(res.files)
-
-            # 3. Tester
-            async for res in run_agent(self.tester): 
-                yield res
-                if res.files: context["files"].update(res.files)
+            print("[Orchestrator] Generator Done.")
             
+            # 3. Tester
+            # Only run tester if generator succeeded
+            last_gen = results.get(self.generator.name)
+            if last_gen and not last_gen.is_error:
+                print("[Orchestrator] Starting Tester...")
+                async for res in run_agent(self.tester): 
+                    yield res
+                    if res.files: context["files"].update(res.files)
+                print("[Orchestrator] Tester Done.")
+            else:
+                 print("[Orchestrator] Skipping Tester (Generator Failed or Error).")
+                 yield AgentResponse(agent_name="System", content="Skipping Tests due to Generator failure.")
+
             last_tester = results.get(self.tester.name)
-            is_failure = last_tester.is_error if last_tester else False
+            is_failure = last_gen.is_error if last_gen else True
+            if last_tester:
+                 is_failure = is_failure or last_tester.is_error
 
             if not is_failure:
+                print("[Orchestrator] Starting Reviewer...")
                 async for res in run_agent(self.reviewer): yield res
+                print("[Orchestrator] Reviewer Done.")
+                
+                print("[Orchestrator] Starting Writer...")
                 async for res in run_agent(self.writer): yield res
+                print("[Orchestrator] Writer Done.")
+                
+                # PERSIST FILES TO DISK for Terminal Access
+                print("[Orchestrator] Saving files to disk...")
+                async for res in self.save_to_disk(context["files"]): yield res
+                print("[Orchestrator] Files saved.")
+
                 yield AgentResponse(agent_name="System", content="Workflow Completed Successfully.")
             else:
+                print("[Orchestrator] Workflow ended with failure status.")
                 yield AgentResponse(agent_name="System", content="Workflow Completed (Tests Failed).")
             
             return
@@ -446,7 +598,12 @@ class Orchestrator:
         current_prompt = user_prompt
         
         while attempt <= MAX_RETRIES:
-            yield AgentResponse(agent_name="System", content=f"Starting Auto-Fix Cycle (Iteration {attempt})")
+            # Signal frontend to clear history for the new attempt
+            yield AgentResponse(
+                agent_name="System", 
+                content=f"Starting Auto-Fix Cycle (Iteration {attempt})",
+                clear_history=True
+            )
             
             # 1. Architect
             # If retry, we use the constructed 'current_prompt' which contains the feedback
@@ -460,6 +617,14 @@ class Orchestrator:
             async for res in run_agent(self.generator, prompt=current_prompt): 
                 yield res
                 if res.files: context["files"].update(res.files)
+            
+            last_gen = results.get(self.generator.name)
+            if last_gen and last_gen.is_error:
+                 yield AgentResponse(agent_name="System", content=f"Code Generation Failed (Iteration {attempt}). Retrying...")
+                 # Prepare Retry for Gen Failure
+                 current_prompt = f"CRITICAL: Generation Failed.\nError Log:\n{context['files'].get('error_log.txt', 'Unknown Error')}\nOriginal Request: {user_prompt}\nTry again."
+                 attempt += 1
+                 continue
 
             # 3. Tester
             async for res in run_agent(self.tester, prompt=current_prompt): 
@@ -472,6 +637,10 @@ class Orchestrator:
             if not is_failure:
                 async for res in run_agent(self.reviewer): yield res
                 async for res in run_agent(self.writer): yield res
+
+                # PERSIST FILES TO DISK for Terminal Access
+                async for res in self.save_to_disk(context["files"]): yield res
+
                 yield AgentResponse(agent_name="System", content=f"Workflow Fixed & Completed in {attempt} iterations.")
                 return
 
@@ -479,9 +648,10 @@ class Orchestrator:
             yield AgentResponse(agent_name="System", content=f"Tests Failed (Iteration {attempt}). Analyzing errors for retry...")
             
             test_log = context["files"].get("TEST_RESULTS.log", "No log")
-            # Collect all code files (source and tests)
-            code_files = {k: v for k, v in context["files"].items() if k.endswith('.py')}
-            code_snapshot = "\n".join([f"--- FILE: {k} ---\n{v}\n" for k, v in code_files.items()])
+            # Collect all generated files (except logs) to provide full context
+            # This ensures the Architect knows about all existing files to avoid duplicates
+            all_files_snapshot = {k: v for k, v in context["files"].items() if not k.endswith('.log')}
+            code_snapshot = "\n".join([f"--- FILE: {k} ---\n{v}\n" for k, v in all_files_snapshot.items()])
             
             # Construct robust feedback prompt for the Architect
             current_prompt = f"""
@@ -495,7 +665,7 @@ class Orchestrator:
             
             ### PREVIOUS ATTEMPT CONTEXT
             
-            #### FAILED IMPLEMENTATION & TESTS
+            #### EXISTING FILES & FAILED IMPLEMENTATION
             {code_snapshot}
             
             #### TEST EXECUTION LOGS
@@ -509,13 +679,5 @@ class Orchestrator:
             """
             
             attempt += 1
-            # Reset context files? 
-            # If we don't, the agents might see old files. 
-            # But we want to keep them so the 'CodeGenerator' can see previous files if needed?
-            # Actually, CodeGenerator usually overwrites.
-            # Ideally, we pass the 'code_snapshot' in the prompt, so we can clean the context or rely on overwrites.
-            # Getting a fresh start for the 'files' dict (except artifacts like readme) might be safer to avoid ghost files.
-            # But let's trust the 'overwrite' mechanics.
             
         yield AgentResponse(agent_name="System", content="max auto-fix retries reached. Stopping.")
-

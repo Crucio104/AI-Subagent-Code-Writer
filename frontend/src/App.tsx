@@ -8,6 +8,8 @@ import 'github-markdown-css/github-markdown.css'
 import { Button } from './components/ui/button'
 import { AgentStatus } from './components/AgentStatus'
 import { FileCode, Terminal, MonitorPlay, ArrowRight, Bot, FolderOpen, X, Copy, Download, Check, Play, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react'
+import { Terminal as XTerminal } from './components/Terminal';
+import type { TerminalRef } from './components/Terminal';
 import { cn } from './lib/utils'
 
 interface LogItem {
@@ -28,6 +30,8 @@ function App() {
   const [sidebarTab, setSidebarTab] = useState<'activity' | 'files'>('activity');
   const [openFiles, setOpenFiles] = useState<string[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
+  const terminalRef = useRef<TerminalRef>(null);
+  const lastTestLogLenRef = useRef(0);
   useEffect(() => {
     // Force Dark Mode always
     document.documentElement.classList.add('dark');
@@ -54,7 +58,7 @@ function App() {
 
     if (wsRef.current) wsRef.current.close();
 
-    const ws = new WebSocket('ws://127.0.0.1:8000/generate');
+    const ws = new WebSocket('ws://localhost:8000/generate');
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -77,11 +81,16 @@ function App() {
       setIsProcessing(false);
     };
 
+    // Reset test log tracking
+    lastTestLogLenRef.current = 0;
+
     ws.onmessage = (event) => {
       // Prevent handling messages from old sockets
       if (ws !== wsRef.current) return;
 
+      console.log('[WebSocket] Message received:', event.data);
       const data = JSON.parse(event.data);
+      console.log('[WebSocket] Parsed data:', data);
 
       if (data.status === 'done') {
         setIsProcessing(false);
@@ -96,9 +105,30 @@ function App() {
         return;
       }
 
+      // Stream Test Results to Terminal
+      if (data.agent_name === 'Tester' && data.files && data.files["TEST_RESULTS.log"]) {
+        const fullLog = data.files["TEST_RESULTS.log"];
+        const newContent = fullLog.slice(lastTestLogLenRef.current);
+        if (newContent) {
+          const formatted = newContent.replace(/\n/g, '\r\n');
+          terminalRef.current?.writeToTerminal(formatted);
+          lastTestLogLenRef.current = fullLog.length;
+          // Auto-open handled by TerminalPanel effect
+        }
+      }
+
       setTimeline(prev => {
         const newTimeline = [...prev];
         const lastItem = newTimeline[newTimeline.length - 1];
+
+        // If clear_history is requested (e.g. starting new auto-fix loop), reset the timeline
+        if (data.clear_history) {
+          return [{
+            agent_name: data.agent_name,
+            content: data.content,
+            status: data.is_error ? 'error' as const : 'working' as const
+          }];
+        }
 
         // If same agent, update content
         if (lastItem && lastItem.agent_name === data.agent_name && lastItem.status === 'working') {
@@ -179,38 +209,23 @@ function App() {
 
   const [isRunning, setIsRunning] = useState(false);
 
-  const handleRun = async (e: React.MouseEvent, filename: string, content: string) => {
+  const handleRun = async (e: React.MouseEvent, filename: string) => {
     e.stopPropagation();
     setIsRunning(true);
-    setGeneratedFiles(prev => ({ ...prev, 'RUN_OUTPUT.log': 'Running script...' }));
 
-    try {
-      const response = await fetch('http://127.0.0.1:8000/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: content, filename })
-      });
+    if (terminalRef.current) {
+      // Send Ctrl+C to clear any running process or prompt, then run the file
+      terminalRef.current.sendText('\x03');
 
-      const data = await response.json();
-
-      let output = "";
-      if (data.error) {
-        output += `Error:\n${data.error}\n`;
-      }
-      if (data.output) {
-        output += `Output:\n${data.output}\n`;
-      }
-      if (!data.output && !data.error) {
-        output = "Script executed successfully with no output.";
-      }
-      output += `\nExit Code: ${data.exit_code}`;
-
-      setGeneratedFiles(prev => ({ ...prev, 'RUN_OUTPUT.log': output }));
-    } catch (err: any) {
-      setGeneratedFiles(prev => ({ ...prev, 'RUN_OUTPUT.log': `Failed to execute script.\nError: ${err.toString()}` }));
-    } finally {
-      setIsRunning(false);
+      // Wait a brief moment for the prompt to reset
+      setTimeout(() => {
+        // Execute from the ephemeral workspace
+        // EPHEMERAL STORAGE: Files are in /tmp/agent_workspace, not /app
+        terminalRef.current?.sendText(`python /tmp/agent_workspace/${filename}\r`);
+      }, 50);
     }
+
+    setTimeout(() => setIsRunning(false), 300);
   };
 
   return (
@@ -588,7 +603,7 @@ function App() {
                     </button>
                     {selectedFile.endsWith('.py') && (
                       <button
-                        onClick={(e) => handleRun(e, selectedFile, generatedFiles[selectedFile])}
+                        onClick={(e) => handleRun(e, selectedFile)}
                         className={cn(
                           "p-1.5 hover:bg-emerald-500/10 rounded-md text-muted-foreground hover:text-emerald-500 transition-colors",
                           isRunning && "animate-pulse text-emerald-500"
@@ -630,34 +645,15 @@ function App() {
 
           {/* Terminal Panel */}
           {/* Resizable Terminal */}
-          {generatedFiles['RUN_OUTPUT.log'] && (
-            <TerminalPanel
-              title="Output Console"
-              content={generatedFiles['RUN_OUTPUT.log']}
-              onClose={() => setGeneratedFiles(prev => {
-                const newFiles = { ...prev };
-                delete newFiles['RUN_OUTPUT.log'];
-                return newFiles;
-              })}
-              height={terminalHeight}
-              onHeightChange={setTerminalHeight}
-              isRunOutput
-            />
-          )}
-
-          {generatedFiles['TEST_RESULTS.log'] && !generatedFiles['RUN_OUTPUT.log'] && (
-            <TerminalPanel
-              title="Test Execution Output"
-              content={generatedFiles['TEST_RESULTS.log']}
-              onClose={() => setGeneratedFiles(prev => {
-                const newFiles = { ...prev };
-                delete newFiles['TEST_RESULTS.log'];
-                return newFiles;
-              })}
-              height={terminalHeight}
-              onHeightChange={setTerminalHeight}
-            />
-          )}
+          {/* Persistent System Terminal */}
+          <TerminalPanel
+            title="System Terminal"
+            content=""
+            onClose={() => { }}
+            height={terminalHeight}
+            onHeightChange={setTerminalHeight}
+            xtermRef={terminalRef}
+          />
         </main>
       </div>
     </div>
@@ -671,14 +667,24 @@ interface TerminalPanelProps {
   height: number;
   onHeightChange: (h: number) => void;
   isRunOutput?: boolean;
+  xtermRef?: React.RefObject<TerminalRef | null>;
 }
 
-function TerminalPanel({ title, content, onClose, height, onHeightChange, isRunOutput }: TerminalPanelProps) {
+function TerminalPanel({ title, content, onClose, height, onHeightChange, isRunOutput, xtermRef }: TerminalPanelProps) {
   const [isMinimized, setIsMinimized] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isResizingRef = useRef(false);
+  const prevContentLen = useRef(0);
 
-  // Auto-scroll to bottom when content changes
+  // Auto-open on new content
+  useEffect(() => {
+    if (content && content.length > prevContentLen.current) {
+      setIsMinimized(false);
+      prevContentLen.current = content.length;
+    }
+  }, [content]);
+
+  // Auto-scroll to bottom
   useEffect(() => {
     if (scrollRef.current && !isMinimized) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -756,9 +762,9 @@ function TerminalPanel({ title, content, onClose, height, onHeightChange, isRunO
         {/* Terminal Content */}
         <div
           ref={scrollRef}
-          className="flex-1 overflow-auto p-4 custom-scrollbar whitespace-pre-wrap select-text"
+          className="flex-1 overflow-hidden relative bg-black custom-scrollbar"
         >
-          {content}
+          <XTerminal height={isMinimized ? 0 : height} ref={xtermRef} />
         </div>
       </motion.div>
     </>
