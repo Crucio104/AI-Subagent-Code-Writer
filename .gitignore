@@ -1,7 +1,7 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
 *.pyd
 .Python
 env/
@@ -9,27 +9,22 @@ venv/
 .env
 .venv
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
+backend/venv/
+backend/__pycache__/
+backend/.env
 
 # Node.js
 node_modules/
-npm-debug.log
-yarn-error.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 .pnp
 .pnp.js
+frontend/dist/
+frontend/node_modules/
+frontend/.env
 
 # IDEs
 .idea/
@@ -41,9 +36,9 @@ yarn-error.log
 .DS_Store
 Thumbs.db
 
-# Project specific
-backend/__pycache__/
-backend/venv/
-backend/.env
-frontend/dist/
-frontend/node_modules/
+# Agent Workspace & Results
+backend/workspace/
+TEST_RESULTS.log
+agent_workspace/
+/tmp/agent_workspace/
+*.log

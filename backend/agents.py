@@ -11,21 +11,24 @@ load_dotenv()
 
 
 USE_LOCAL_LLM = os.getenv("USE_LOCAL_LLM", "true").lower() == "true"
-LLM_MODEL = os.getenv("LLM_MODEL", "local-model")
+# Default model: 'local-model' for local, 'gpt-4o-mini' for OpenAI
+DEFAULT_MODEL = "local-model" if USE_LOCAL_LLM else "gpt-4o-mini"
+LLM_MODEL = os.getenv("LLM_MODEL", DEFAULT_MODEL)
 
+# Base URL handling
 if USE_LOCAL_LLM:
-    API_KEY = "lm-studio"
     if os.getenv("RUNNING_IN_DOCKER") == "true":
-        BASE_URL = os.getenv("OPENAI_BASE_URL", "http://host.docker.internal:1234/v1")
+         DEFAULT_BASE_URL = "http://host.docker.internal:1234/v1"
     else:
-        BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:1234/v1")
-    client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
-    print(f"Loaded: Using Local LLM at {BASE_URL} with model {LLM_MODEL}")
+         DEFAULT_BASE_URL = "http://localhost:1234/v1"
+    BASE_URL = os.getenv("OPENAI_BASE_URL", DEFAULT_BASE_URL)
+    API_KEY = "lm-studio"
 else:
+    BASE_URL = os.getenv("OPENAI_BASE_URL") # Can be None for default OpenAI
     API_KEY = os.getenv("OPENAI_API_KEY")
-    BASE_URL = os.getenv("OPENAI_BASE_URL")
-    client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
-    print(f"Loaded: Using OpenAI API with model {LLM_MODEL}")
+
+client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
+print(f"Loaded: Using {'Local LLM' if USE_LOCAL_LLM else 'OpenAI API'} at {BASE_URL or 'Default OpenAI URL'} with model {LLM_MODEL}")
 
 
 class AgentResponse(BaseModel):
@@ -49,21 +52,24 @@ class Agent:
                 local_mode = config["use_local_llm"]
 
             if local_mode:
-                effective_base_url = os.getenv("OPENAI_BASE_URL", "http://localhost:1234/v1")
-                if os.getenv("RUNNING_IN_DOCKER") == "true":
-                     effective_base_url = os.getenv("OPENAI_BASE_URL", "http://host.docker.internal:1234/v1")
                 effective_api_key = "lm-studio"
-                effective_model = "local-model"
+                effective_model = LLM_MODEL if local_mode == USE_LOCAL_LLM else "local-model"
+                
+                if os.getenv("RUNNING_IN_DOCKER") == "true":
+                     fallback_url = "http://host.docker.internal:1234/v1"
+                else:
+                     fallback_url = "http://localhost:1234/v1"
+                effective_base_url = os.getenv("OPENAI_BASE_URL", fallback_url)
                 timeout_val = 240.0
             else:
-                effective_base_url = os.getenv("OPENAI_BASE_URL")
                 effective_api_key = os.getenv("OPENAI_API_KEY")
+                effective_model = LLM_MODEL if local_mode == USE_LOCAL_LLM else "gpt-4o-mini"
+                effective_base_url = os.getenv("OPENAI_BASE_URL")
 
-                # Check config for API Key override
+                # Check config for API Key override (sent from frontend)
                 if config and config.get("api_key"):
                     effective_api_key = config["api_key"]
-
-                effective_model = "gpt-4o"
+                
                 timeout_val = 60.0
                 
                 if not effective_api_key:
