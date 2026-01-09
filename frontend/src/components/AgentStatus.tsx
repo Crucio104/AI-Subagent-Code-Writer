@@ -21,7 +21,7 @@ const getAgentIcon = (name: string) => {
 export const AgentStatus: React.FC<AgentStatusProps> = ({ timeline }) => {
     return (
         <div className="h-full flex flex-col">
-            <div className="flex-1 overflow-y-auto p-4 space-y-6">
+            <div className="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar">
                 <div className="relative pl-2">
                     {/* Continuous Line */}
                     <div className="absolute left-[11px] top-2 bottom-2 w-[1px] bg-border" />

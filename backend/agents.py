@@ -56,6 +56,11 @@ class Agent:
             else:
                 effective_base_url = os.getenv("OPENAI_BASE_URL")
                 effective_api_key = os.getenv("OPENAI_API_KEY")
+
+                # Check config for API Key override
+                if config and config.get("api_key"):
+                    effective_api_key = config["api_key"]
+
                 effective_model = "gpt-4o"
                 timeout_val = 60.0
                 
@@ -389,23 +394,128 @@ class Orchestrator:
         self.writer = TechnicalWriter()
 
     async def run_workflow(self, user_prompt: str, config: Optional[Dict] = None):
-        context = {"files": {}, "architect_plan": "", "config": config}
+        config = config or {}
+        auto_fix = config.get("auto_fix", False)
         
-        async def run_agent(agent):
+        context = {"files": {}, "architect_plan": "", "config": config}
+        results = {}
+
+        async def run_agent(agent, prompt=None):
+            p = prompt or user_prompt
             last_response = None
-            async for response in agent.process(user_prompt, context):
+            async for response in agent.process(p, context):
                 last_response = response
                 yield response
-            
-            if last_response:
-                if last_response.internal_output:
-                    context["architect_plan"] = last_response.internal_output
-                if last_response.files:
-                    context["files"].update(last_response.files)
+            results[agent.name] = last_response
 
-        async for res in run_agent(self.architect): yield res
-        async for res in run_agent(self.generator): yield res
-        async for res in run_agent(self.tester): yield res
-        async for res in run_agent(self.reviewer): yield res
-        async for res in run_agent(self.writer): yield res
+        # --- Single Pass Mode ---
+        if not auto_fix:
+            yield AgentResponse(agent_name="System", content="Starting Workflow...")
+            
+            # 1. Architect
+            async for res in run_agent(self.architect): yield res
+            last_arch = results.get(self.architect.name)
+            if last_arch and last_arch.internal_output:
+                context["architect_plan"] = last_arch.internal_output
+
+            # 2. Generator
+            async for res in run_agent(self.generator): 
+                yield res
+                if res.files: context["files"].update(res.files)
+
+            # 3. Tester
+            async for res in run_agent(self.tester): 
+                yield res
+                if res.files: context["files"].update(res.files)
+            
+            last_tester = results.get(self.tester.name)
+            is_failure = last_tester.is_error if last_tester else False
+
+            if not is_failure:
+                async for res in run_agent(self.reviewer): yield res
+                async for res in run_agent(self.writer): yield res
+                yield AgentResponse(agent_name="System", content="Workflow Completed Successfully.")
+            else:
+                yield AgentResponse(agent_name="System", content="Workflow Completed (Tests Failed).")
+            
+            return
+
+        # --- Auto-Fix Loop Mode ---
+        MAX_RETRIES = 15 # Safety limit to prevent infinite cost
+        attempt = 1
+        current_prompt = user_prompt
+        
+        while attempt <= MAX_RETRIES:
+            yield AgentResponse(agent_name="System", content=f"Starting Auto-Fix Cycle (Iteration {attempt})")
+            
+            # 1. Architect
+            # If retry, we use the constructed 'current_prompt' which contains the feedback
+            async for res in run_agent(self.architect, prompt=current_prompt): yield res
+            
+            last_arch = results.get(self.architect.name)
+            if last_arch and last_arch.internal_output:
+                context["architect_plan"] = last_arch.internal_output
+
+            # 2. Generator
+            async for res in run_agent(self.generator, prompt=current_prompt): 
+                yield res
+                if res.files: context["files"].update(res.files)
+
+            # 3. Tester
+            async for res in run_agent(self.tester, prompt=current_prompt): 
+                yield res
+                if res.files: context["files"].update(res.files)
+
+            last_tester = results.get(self.tester.name)
+            is_failure = last_tester.is_error if last_tester else False
+
+            if not is_failure:
+                async for res in run_agent(self.reviewer): yield res
+                async for res in run_agent(self.writer): yield res
+                yield AgentResponse(agent_name="System", content=f"Workflow Fixed & Completed in {attempt} iterations.")
+                return
+
+            # Handle Failure & Retry
+            yield AgentResponse(agent_name="System", content=f"Tests Failed (Iteration {attempt}). Analyzing errors for retry...")
+            
+            test_log = context["files"].get("TEST_RESULTS.log", "No log")
+            # Collect all code files (source and tests)
+            code_files = {k: v for k, v in context["files"].items() if k.endswith('.py')}
+            code_snapshot = "\n".join([f"--- FILE: {k} ---\n{v}\n" for k, v in code_files.items()])
+            
+            # Construct robust feedback prompt for the Architect
+            current_prompt = f"""
+            CRITICAL: PREVIOUS ITERATION FAILED VALIDATION.
+            
+            ### OBJECTIVE
+            Fix the errors in the codebase to satisfy the User Request.
+            
+            ### ORIGINAL REQUEST
+            {user_prompt}
+            
+            ### PREVIOUS ATTEMPT CONTEXT
+            
+            #### FAILED IMPLEMENTATION & TESTS
+            {code_snapshot}
+            
+            #### TEST EXECUTION LOGS
+            {test_log}
+            
+            ### YOUR TASK
+            1. Analyze the 'TEST EXECUTION LOGS' to understand why it failed.
+            2. Review the 'FAILED IMPLEMENTATION' to find the bugs.
+            3. CREATE A NEW IMPLEMENTATION PLAN that specifically addresses these errors.
+            4. Be extremely careful to not repeat the same mistake.
+            """
+            
+            attempt += 1
+            # Reset context files? 
+            # If we don't, the agents might see old files. 
+            # But we want to keep them so the 'CodeGenerator' can see previous files if needed?
+            # Actually, CodeGenerator usually overwrites.
+            # Ideally, we pass the 'code_snapshot' in the prompt, so we can clean the context or rely on overwrites.
+            # Getting a fresh start for the 'files' dict (except artifacts like readme) might be safer to avoid ghost files.
+            # But let's trust the 'overwrite' mechanics.
+            
+        yield AgentResponse(agent_name="System", content="max auto-fix retries reached. Stopping.")
 

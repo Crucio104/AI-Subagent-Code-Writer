@@ -7,7 +7,7 @@ import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import 'github-markdown-css/github-markdown.css'
 import { Button } from './components/ui/button'
 import { AgentStatus } from './components/AgentStatus'
-import { FileCode, Terminal, MonitorPlay, ArrowRight, Bot, FolderOpen, X, Copy, Download, Check, Play, ChevronDown, ChevronUp } from 'lucide-react'
+import { FileCode, Terminal, MonitorPlay, ArrowRight, Bot, FolderOpen, X, Copy, Download, Check, Play, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react'
 import { cn } from './lib/utils'
 
 interface LogItem {
@@ -37,6 +37,10 @@ function App() {
   // Theme toggle removed as requested
 
   // Resizable Terminal State
+  // API Key State
+  const [openAiKey, setOpenAiKey] = useState('');
+  const [showKeyInput, setShowKeyInput] = useState(false);
+  const [autoFix, setAutoFix] = useState(false);
   const [terminalHeight, setTerminalHeight] = useState(192); // Default 192px (12rem/48 class)
 
 
@@ -55,7 +59,12 @@ function App() {
 
     ws.onopen = () => {
       console.log('Connected to backend');
-      ws.send(JSON.stringify({ prompt, use_local_llm: useLocalLLM }));
+      ws.send(JSON.stringify({
+        prompt,
+        use_local_llm: useLocalLLM,
+        api_key: !useLocalLLM ? openAiKey : undefined,
+        auto_fix: autoFix
+      }));
     };
 
     ws.onerror = (error) => {
@@ -259,19 +268,55 @@ function App() {
                 >
                   Local LLM
                 </button>
-                <button
-                  onClick={() => setUseLocalLLM(false)}
+                <div
                   className={cn(
-                    "relative z-10 flex-1 text-xs font-medium py-1.5 rounded-xl transition-all duration-300",
+                    "relative z-10 flex-1 flex items-center rounded-xl overflow-hidden transition-all duration-300",
                     !useLocalLLM ? "text-foreground font-semibold" : "text-muted-foreground hover:text-foreground"
                   )}
                 >
-                  OpenAI API
-                </button>
+                  <button
+                    onClick={() => setUseLocalLLM(false)}
+                    className="flex-1 text-xs font-medium py-1.5 h-full text-center hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                  >
+                    OpenAI API
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setUseLocalLLM(false);
+                      setShowKeyInput(!showKeyInput);
+                    }}
+                    className="px-2 py-1.5 h-full hover:bg-black/10 dark:hover:bg-white/10 transition-colors border-l border-border/20"
+                  >
+                    <ChevronDown className={cn("w-3 h-3 transition-transform", showKeyInput && "rotate-180")} />
+                  </button>
+                </div>
               </div>
 
+              <AnimatePresence>
+                {showKeyInput && !useLocalLLM && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    className="overflow-hidden"
+                  >
+                    <div className="pb-2">
+                      <input
+                        type="password"
+                        placeholder="sk-..."
+                        value={openAiKey}
+                        onChange={(e) => setOpenAiKey(e.target.value)}
+                        className="w-full text-xs p-2 rounded-xl bg-muted/30 border border-border/50 focus:outline-none focus:border-primary/50 transition-colors font-mono"
+                      />
+                      <p className="text-[10px] text-muted-foreground mt-1 ml-1">Key is only used for this session.</p>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
               <textarea
-                className="w-full min-h-[100px] p-3 rounded-2xl border border-input bg-white text-black dark:bg-[#000000] dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary resize-none placeholder:text-muted-foreground/60 transition-all font-mono custom-scrollbar"
+                className="w-full min-h-[160px] p-4 rounded-2xl border border-input bg-white text-black dark:bg-[#000000] dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none placeholder:text-muted-foreground/50 transition-all font-mono custom-scrollbar shadow-sm"
                 placeholder="Describe what you want to build..."
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
@@ -283,6 +328,28 @@ function App() {
                   }
                 }}
               />
+
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  onClick={() => setAutoFix(!autoFix)}
+                  className={cn(
+                    "group flex items-center gap-2.5 px-4 py-2.5 rounded-xl text-xs font-semibold transition-all duration-300 border",
+                    autoFix
+                      ? "bg-primary text-primary-foreground border-primary shadow-[0_4px_12px_rgba(var(--primary),0.25)] hover:shadow-[0_4px_16px_rgba(var(--primary),0.4)]"
+                      : "bg-muted/40 text-muted-foreground border-border/50 hover:bg-muted/60 hover:text-foreground hover:border-border"
+                  )}
+                >
+                  <RefreshCw className={cn("w-3.5 h-3.5 transition-transform duration-500", autoFix ? "rotate-180" : "group-hover:rotate-90")} />
+                  <span>Auto-Fix Loop</span>
+                </button>
+
+                <span className={cn(
+                  "text-[10px] font-medium uppercase tracking-wider transition-colors duration-300",
+                  autoFix ? "text-primary" : "text-muted-foreground/50"
+                )}>
+                  {autoFix ? "Retry Enabled" : "Single Pass"}
+                </span>
+              </div>
               <div className="flex gap-2">
                 <Button
                   className="flex-1 justify-between group transition-colors"

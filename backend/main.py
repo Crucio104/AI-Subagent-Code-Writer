@@ -60,7 +60,9 @@ async def websocket_endpoint(websocket: WebSocket):
         prompt = request_data.get("prompt")
         
         use_local_llm = request_data.get("use_local_llm", True) 
-        config = {"use_local_llm": use_local_llm}
+        api_key = request_data.get("api_key")
+        auto_fix = request_data.get("auto_fix", False)
+        config = {"use_local_llm": use_local_llm, "api_key": api_key, "auto_fix": auto_fix}
 
         if not prompt:
             await websocket.send_json({"error": "No prompt provided"})
