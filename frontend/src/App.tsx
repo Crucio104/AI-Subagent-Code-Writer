@@ -7,7 +7,7 @@ import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import 'github-markdown-css/github-markdown.css'
 import { Button } from './components/ui/button'
 import { AgentStatus } from './components/AgentStatus'
-import { FileCode, Terminal, MonitorPlay, ArrowRight, Bot, FolderOpen, X, Copy, Download, Check, Play, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react'
+import { FileCode, Terminal, MonitorPlay, ArrowRight, Bot, FolderOpen, X, Copy, Download, Check, Play, ChevronDown, ChevronUp, RefreshCw, Mic, MicOff } from 'lucide-react'
 import { Terminal as XTerminal } from './components/Terminal';
 import type { TerminalRef } from './components/Terminal';
 import { cn } from './lib/utils'
@@ -41,11 +41,74 @@ function App() {
   // Theme toggle removed as requested
 
   // Resizable Terminal State
-  // API Key State
   const [openAiKey, setOpenAiKey] = useState('');
   const [showKeyInput, setShowKeyInput] = useState(false);
   const [autoFix, setAutoFix] = useState(false);
   const [terminalHeight, setTerminalHeight] = useState(192); // Default 192px (12rem/48 class)
+
+  // Voice Input Logic
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+
+  const startListening = () => {
+    console.log("startListening called, isListening:", isListening);
+
+    if (isListening) {
+      console.log("Stopping recognition...");
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      setIsListening(false);
+      return;
+    }
+
+    console.log("Starting recognition...");
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+      alert("Browser does not support speech recognition. Please use Chrome or Edge.");
+      return;
+    }
+
+    // @ts-ignore
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const recognition = new SpeechRecognition();
+    recognitionRef.current = recognition;
+    recognition.lang = 'it-IT'; // Default to Italian as per user preference
+    recognition.continuous = false;
+    recognition.interimResults = false;
+
+    recognition.onstart = () => {
+      console.log("Recognition onstart fired");
+      setIsListening(true);
+    };
+    recognition.onend = () => {
+      console.log("Recognition onend fired");
+      setIsListening(false);
+    };
+    recognition.onerror = (event: any) => {
+      console.error("Speech recognition error", event.error);
+      setIsListening(false);
+      if (event.error === 'not-allowed') {
+        alert("Microphone access denied. Please allow microphone permissions.");
+      } else {
+        alert("Errore riconoscimento vocale: " + event.error);
+      }
+    };
+    recognition.onresult = (event: any) => {
+      console.log("Recognition onresult fired", event);
+      const transcript = event.results[0][0].transcript;
+      console.log("Transcript:", transcript);
+      setPrompt(prev => prev + (prev ? " " : "") + transcript);
+    };
+    try {
+      console.log("Calling recognition.start()...");
+      recognition.start();
+      console.log("Recognition.start() called successfully");
+    } catch (e) {
+      console.error("Error calling recognition.start():", e);
+      alert("Errore nell'avvio del riconoscimento vocale: " + e);
+    }
+  };
+
 
 
   const startGeneration = () => {
@@ -330,19 +393,37 @@ function App() {
                 )}
               </AnimatePresence>
 
-              <textarea
-                className="w-full min-h-[160px] p-4 rounded-2xl border border-input bg-white text-black dark:bg-[#000000] dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none placeholder:text-muted-foreground/50 transition-all font-mono custom-scrollbar shadow-sm"
-                placeholder="Describe what you want to build..."
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                disabled={false}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    startGeneration();
-                  }
-                }}
-              />
+              <div className="relative">
+                <textarea
+                  className="w-full min-h-[160px] p-4 pr-12 rounded-2xl border border-input bg-white text-black dark:bg-[#000000] dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none placeholder:text-muted-foreground/50 transition-all font-mono custom-scrollbar shadow-sm"
+                  placeholder="Describe what you want to build..."
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  disabled={false}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      startGeneration();
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    console.log("Mic button clicked!");
+                    startListening();
+                  }}
+                  className={cn(
+                    "absolute bottom-3 right-3 p-2 rounded-xl transition-all duration-300 z-10 cursor-pointer hover:scale-110 active:scale-95",
+                    isListening
+                      ? "bg-red-500/20 text-red-500 animate-pulse"
+                      : "bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  )}
+                  title="Voice Input"
+                >
+                  {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                </button>
+              </div>
 
               <div className="flex items-center justify-between gap-3">
                 <button
@@ -648,7 +729,6 @@ function App() {
           {/* Persistent System Terminal */}
           <TerminalPanel
             title="System Terminal"
-            content=""
             onClose={() => { }}
             height={terminalHeight}
             onHeightChange={setTerminalHeight}
@@ -662,7 +742,6 @@ function App() {
 
 interface TerminalPanelProps {
   title: string;
-  content: string;
   onClose: () => void;
   height: number;
   onHeightChange: (h: number) => void;
@@ -670,52 +749,58 @@ interface TerminalPanelProps {
   xtermRef?: React.RefObject<TerminalRef | null>;
 }
 
-function TerminalPanel({ title, content, onClose, height, onHeightChange, isRunOutput, xtermRef }: TerminalPanelProps) {
+function TerminalPanel({ title, height, onHeightChange, isRunOutput, xtermRef, onClose }: TerminalPanelProps) {
   const [isMinimized, setIsMinimized] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [isResizing, setIsResizing] = useState(false);
   const isResizingRef = useRef(false);
-  const prevContentLen = useRef(0);
-
-  // Auto-open on new content
-  useEffect(() => {
-    if (content && content.length > prevContentLen.current) {
-      setIsMinimized(false);
-      prevContentLen.current = content.length;
-    }
-  }, [content]);
-
-  // Auto-scroll to bottom
-  useEffect(() => {
-    if (scrollRef.current && !isMinimized) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [content, isMinimized]);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   const startResizing = (e: React.MouseEvent) => {
     isResizingRef.current = true;
+    setIsResizing(true);
     document.body.style.cursor = 'row-resize';
     e.preventDefault();
   };
 
   useEffect(() => {
+    let rafId: number | null = null;
+    let targetHeight = height;
+
     const handleMouseMove = (e: MouseEvent) => {
       if (!isResizingRef.current) return;
+
       const newHeight = window.innerHeight - e.clientY;
-      if (newHeight > 100 && newHeight < window.innerHeight * 0.8) {
-        onHeightChange(newHeight);
+      if (newHeight > 60 && newHeight < window.innerHeight * 0.8) {
+        targetHeight = newHeight;
+        if (rafId === null) {
+          rafId = requestAnimationFrame(() => {
+            onHeightChange(targetHeight);
+            rafId = null;
+          });
+        }
       }
     };
+
     const handleMouseUp = () => {
-      isResizingRef.current = false;
-      document.body.style.cursor = 'default';
+      if (isResizingRef.current) {
+        isResizingRef.current = false;
+        setIsResizing(false);
+        document.body.style.cursor = 'default';
+        if (rafId !== null) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+      }
     };
+
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
+      if (rafId !== null) cancelAnimationFrame(rafId);
     };
-  }, [onHeightChange]);
+  }, [onHeightChange, height]);
 
   return (
     <>
@@ -729,17 +814,39 @@ function TerminalPanel({ title, content, onClose, height, onHeightChange, isRunO
 
       <motion.div
         initial={false}
-        animate={{ height: isMinimized ? 40 : height }}
-        transition={{ type: "spring", stiffness: 400, damping: 30 }}
+        style={{ height: isMinimized ? 40 : height }}
         className={cn(
           "border-t border-border bg-black font-mono text-xs flex flex-col shrink-0 overflow-hidden relative shadow-2xl z-20",
           isRunOutput ? "text-emerald-400" : "text-green-400"
         )}
       >
-        {/* Terminal Header */}
-        <div className="flex items-center gap-2 px-4 py-2 border-b border-white/10 bg-white/5 shrink-0 select-none">
-          <Terminal className="w-3.5 h-3.5 opacity-70" />
-          <span className="uppercase tracking-widest font-semibold flex-1 text-[10px] opacity-90">{title}</span>
+        {/* Resize Overlay: Prevents terminal from swallowing mouse events during drag */}
+        {isResizing && (
+          <div className="absolute inset-0 z-50 cursor-row-resize" />
+        )}
+
+        <div className="flex items-center gap-2.5 px-4 py-2 border-b border-border/40 bg-gradient-to-r from-muted/30 via-muted/15 to-transparent shrink-0 select-none backdrop-blur-md">
+          <div className="relative flex items-center justify-center">
+            <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center group-hover:bg-primary/20 transition-colors">
+              <Terminal className="w-4 h-4 text-primary" />
+            </div>
+            {!isMinimized && (
+              <span className="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+              </span>
+            )}
+          </div>
+          <div className="flex flex-col">
+            <span className="uppercase tracking-[0.15em] font-black text-[10px] text-foreground/90 leading-none">
+              {title}
+            </span>
+            {!isMinimized && (
+              <span className="text-[8px] text-muted-foreground/60 font-medium tracking-tight mt-0.5">
+                ACTIVE SESSION ● SYSTEM_READY
+              </span>
+            )}
+          </div>
 
           <div className="flex items-center gap-1">
             <button
@@ -771,4 +878,4 @@ function TerminalPanel({ title, content, onClose, height, onHeightChange, isRunO
   );
 }
 
-export default App
+export default App;

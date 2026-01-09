@@ -535,35 +535,34 @@ class Orchestrator:
 
         # --- Single Pass Mode ---
         if not auto_fix:
-            print("[Orchestrator] Entering Single Pass Mode")
             yield AgentResponse(agent_name="System", content="Starting Workflow...")
             
             # 1. Architect
-            print("[Orchestrator] Starting Architect...")
             async for res in run_agent(self.architect): yield res
             last_arch = results.get(self.architect.name)
             if last_arch and last_arch.internal_output:
                 context["architect_plan"] = last_arch.internal_output
-            print("[Orchestrator] Architect Done.")
 
             # 2. Generator
-            print("[Orchestrator] Starting Generator...")
             async for res in run_agent(self.generator): 
                 yield res
-                if res.files: context["files"].update(res.files)
-            print("[Orchestrator] Generator Done.")
+                if res.files: 
+                    context["files"].update(res.files)
+            
+            # EPHEMERAL STORAGE FIX: Save files immediately after generation
+            async for res in self.save_to_disk(context["files"]): yield res
             
             # 3. Tester
             # Only run tester if generator succeeded
             last_gen = results.get(self.generator.name)
             if last_gen and not last_gen.is_error:
-                print("[Orchestrator] Starting Tester...")
                 async for res in run_agent(self.tester): 
                     yield res
-                    if res.files: context["files"].update(res.files)
-                print("[Orchestrator] Tester Done.")
+                    if res.files: 
+                        context["files"].update(res.files)
+                # Save tests/updated files
+                async for res in self.save_to_disk(context["files"]): yield res
             else:
-                 print("[Orchestrator] Skipping Tester (Generator Failed or Error).")
                  yield AgentResponse(agent_name="System", content="Skipping Tests due to Generator failure.")
 
             last_tester = results.get(self.tester.name)
@@ -572,22 +571,16 @@ class Orchestrator:
                  is_failure = is_failure or last_tester.is_error
 
             if not is_failure:
-                print("[Orchestrator] Starting Reviewer...")
                 async for res in run_agent(self.reviewer): yield res
-                print("[Orchestrator] Reviewer Done.")
-                
-                print("[Orchestrator] Starting Writer...")
                 async for res in run_agent(self.writer): yield res
-                print("[Orchestrator] Writer Done.")
                 
-                # PERSIST FILES TO DISK for Terminal Access
-                print("[Orchestrator] Saving files to disk...")
+                # FINAL PERSISTENCE
                 async for res in self.save_to_disk(context["files"]): yield res
-                print("[Orchestrator] Files saved.")
+
+                yield AgentResponse(agent_name="System", content="Workflow Completed Successfully.")
 
                 yield AgentResponse(agent_name="System", content="Workflow Completed Successfully.")
             else:
-                print("[Orchestrator] Workflow ended with failure status.")
                 yield AgentResponse(agent_name="System", content="Workflow Completed (Tests Failed).")
             
             return
@@ -631,6 +624,9 @@ class Orchestrator:
                 yield res
                 if res.files: context["files"].update(res.files)
 
+            # SAVE TO DISK REGARDLESS OF TEST SUCCESS/FAILURE
+            async for res in self.save_to_disk(context["files"]): yield res
+
             last_tester = results.get(self.tester.name)
             is_failure = last_tester.is_error if last_tester else False
 
@@ -638,7 +634,7 @@ class Orchestrator:
                 async for res in run_agent(self.reviewer): yield res
                 async for res in run_agent(self.writer): yield res
 
-                # PERSIST FILES TO DISK for Terminal Access
+                # FINAL PERSISTENCE
                 async for res in self.save_to_disk(context["files"]): yield res
 
                 yield AgentResponse(agent_name="System", content=f"Workflow Fixed & Completed in {attempt} iterations.")

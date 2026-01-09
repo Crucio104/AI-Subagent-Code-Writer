@@ -75,18 +75,13 @@ async def websocket_endpoint(websocket: WebSocket):
 
         print(f"Starting generation with prompt: {prompt[:50]}...")
         async for response in orchestrator.run_workflow(prompt, config):
-            print(f"Backend yielding response from: {response.agent_name}")
             await websocket.send_json(response.dict())
-            print(f"Message sent to client for: {response.agent_name}")
             
-        print("Workflow finished, sending done status")
         await websocket.send_json({"status": "done"})
 
     except WebSocketDisconnect:
         print("Client disconnected")
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         print(f"Generate Critical Error: {e}")
         try:
              await websocket.send_json({"error": f"Backend Error: {str(e)}"})
