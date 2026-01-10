@@ -2,7 +2,6 @@
 
 OpenSyntax is a sophisticated AI-powered software development environment that orchestrates specialized agents to autonomously build, test, and refine codebases. Now featuring robust **polyglot support**, OpenSyntax bridges the gap between high-level descriptions and functioning software in Python, C, C++, Java, Go, and Rust.
 
-![OpenSyntax UI Placeholder](https://via.placeholder.com/800x450?text=OpenSyntax+UI+Preview)
 
 ## ✨ Key Features
 
@@ -73,5 +72,3 @@ Once initialized, access the workspace at:
 ## 🛡️ License
 Distributed under the MIT License. See `LICENSE` for more information.
 
----
-*Built with ❤️ by the OpenSyntax Team.*
