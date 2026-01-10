@@ -1,4 +1,3 @@
-# filename: ciao.py
 def merge_sort(arr):
     """Sorts an array using the merge sort algorithm"""
     if len(arr) <= 1:

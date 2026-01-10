@@ -25,7 +25,7 @@ else:
     API_KEY = os.getenv("OPENAI_API_KEY")
 
 client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
-print(f"Loaded: Using {'Local LLM' if USE_LOCAL_LLM else 'OpenAI API'} at {BASE_URL or 'Default OpenAI URL'} with model {LLM_MODEL}")
+client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 class AgentResponse(BaseModel):
     agent_name: str
@@ -85,13 +85,11 @@ class Agent:
                     return response.choices[0].message.content
                 except Exception as e:
                     import traceback
-                    print(f"[{self.name}] LLM Error (Attempt {attempt+1}/3): {repr(e)}")
                     if attempt == 2:
                         return self.mock_fallback(user_prompt)
                     await asyncio.sleep(2)
             return self.mock_fallback(user_prompt)
         except Exception as e:
-            print(f"[{self.name}] Critical Error: {e}")
             return self.mock_fallback(user_prompt)
 
     def mock_fallback(self, user_prompt: str) -> str:
@@ -124,9 +122,23 @@ class SystemArchitect(Agent):
         2. Explain the rationale behind the file structure and key components.
         3. Return ONLY the raw Markdown content. Do NOT wrap in JSON.
         4. CRITICAL: Use correct Markdown spacing (e.g., `# Title`, `## Section`, not `##Section`).
+        
+        STRICT FILE PRESERVATION RULES:
+        - The user's goal might be small. DO NOT assume they want a full rewrite.
+        - Existing files are provided below. Treat them as READ-ONLY unless the user explicitly asks to change them.
+        - If the user asks for a new feature, YOU MUST create new files (e.g., `new_feature.py`) rather than modifying or deleting existing ones.
+        - DO NOT list an existing file in the plan if you are not changing it at all.
+        - VIOLATION OF THIS RULE WILL CAUSE DATA LOSS. BE CAREFUL.
         """
         
-        response_text = await self.call_llm(system_prompt, f"User Request: {input_data}", config)
+
+        
+        existing_files_str = ""
+        files = previous_context.get("files", {})
+        if files:
+            existing_files_str = "\n\nExisting Files:\n" + "\n".join([f"--- {k} ---\n{v}\n" for k, v in files.items()])
+
+        response_text = await self.call_llm(system_prompt, f"User Request: {input_data}{existing_files_str}", config)
         
         import re
         response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
@@ -180,9 +192,23 @@ class CodeGenerator(Agent):
         6. **File Organization**: Use FULL RELATIVE PATHS in the filename comment to define the folder structure.
            - Example: `# filename: src/main.rs` or `# filename: src/components/Header.tsx`.
            - Do not assume flat structure if complex.
+           
+        STRICT FILE PRESERVATION RULES:
+        - The text below contains "Existing Files".
+        - YOU MUST NOT output code for any file that already exists UNLESS the user prompt explicitly requested a change to that specific file.
+        - Unsolicited rewrites of existing files will be considered a CRITICAL FAILURE.
+        - If you need to use an existing function, just import it. DO NOT redefine it.
+        - DO NOT RETURN CODE BLOCKS FOR FILES YOU ARE NOT CHANGING.
         """
         
-        full_prompt = f"User Request: {input_data}\\n\\nArchitect's Plan: {previous_context.get('architect_plan', '')}"
+
+        
+        existing_files_str = ""
+        files = previous_context.get("files", {})
+        if files:
+            existing_files_str = "\n\nExisting Files:\n" + "\n".join([f"--- {k} ---\n{v}\n" for k, v in files.items()])
+        
+        full_prompt = f"User Request: {input_data}\\n\\nArchitect's Plan: {previous_context.get('architect_plan', '')}{existing_files_str}"
         
         response_text = await self.call_llm(system_prompt, full_prompt, config)
         
@@ -585,11 +611,27 @@ class Orchestrator:
         except Exception as e:
             yield AgentResponse(agent_name="System", content=f"Warning: Failed to clean workspace: {e}", is_error=True)
 
+    async def load_workspace_files(self) -> Dict[str, str]:
+        files = {}
+        workspace_dir = "/app/workspace"
+        if os.path.exists(workspace_dir):
+            for root, dirs, filenames in os.walk(workspace_dir):
+                for filename in filenames:
+                    filepath = os.path.join(root, filename)
+                    rel_path = os.path.relpath(filepath, workspace_dir).replace("\\", "/")
+                    try:
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            files[rel_path] = f.read()
+                    except:
+                        pass
+        return files
+
     async def run_workflow(self, user_prompt: str, config: Optional[Dict] = None):
         config = config or {}
         auto_fix = config.get("auto_fix", False)
         
-        context = {"files": {}, "architect_plan": "", "config": config}
+        existing_files = await self.load_workspace_files()
+        context = {"files": existing_files, "architect_plan": "", "config": config}
         results = {}
 
         async def run_agent(agent, prompt=None):
@@ -601,7 +643,6 @@ class Orchestrator:
             results[agent.name] = last_response
 
         if not auto_fix:
-            async for res in self.cleanup_workspace(): yield res
             yield AgentResponse(agent_name="System", content="Starting Workflow...")
             
             async for res in run_agent(self.architect): yield res

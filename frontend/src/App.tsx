@@ -1,16 +1,22 @@
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import 'github-markdown-css/github-markdown.css'
 import { Button } from './components/ui/button'
 import { AgentStatus } from './components/AgentStatus'
-import { FileCode, Terminal, MonitorPlay, ArrowRight, Bot, FolderOpen, X, Copy, Download, Check, Play, ChevronDown, ChevronUp, RefreshCw, Mic, MicOff, Hammer, Plus } from 'lucide-react'
+import { FileCode, MonitorPlay, ArrowRight, Bot, FolderOpen, X, Copy, Download, Check, Play, ChevronDown, ChevronUp, RefreshCw, Mic, MicOff, Hammer, Plus, FolderPlus, Trash2, Terminal } from 'lucide-react'
 import { Terminal as XTerminal } from './components/Terminal';
 import type { TerminalRef } from './components/Terminal';
 import { cn } from './lib/utils'
 import { FileExplorer } from './components/FileExplorer';
+import CodeEditor from './components/CodeEditor';
+import { CreateFileModal } from './components/CreateFileModal';
+
+import FileActionMenu from './components/FileActionMenu';
+import { ConfirmationModal } from './components/ConfirmationModal';
+import { NameInputModal } from './components/NameInputModal';
+import Portal from './components/Portal';
+import { Save, Pencil } from 'lucide-react';
 
 const LANGUAGES = [
   { id: 'Python', name: 'Python', ext: '.py', color: 'bg-blue-500' },
@@ -106,14 +112,18 @@ const buildFileTree = (files: { [key: string]: string }) => {
     const parts = cleanPath.split('/');
 
     let current = root;
-    parts.forEach((part, index) => {
-      if (index === parts.length - 1) {
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (i === parts.length - 1) {
         current[part] = files[path];
       } else {
+        if (current[part] && typeof current[part] === 'string') {
+          return;
+        }
         current[part] = current[part] || {};
         current = current[part];
       }
-    });
+    }
   });
   return root;
 };
@@ -132,6 +142,26 @@ function App() {
   const terminalRef = useRef<TerminalRef>(null);
   const lastTestLogLenRef = useRef(0);
 
+
+
+  // Initial load of files
+  useEffect(() => {
+    const fetchFiles = async () => {
+      try {
+        const res = await fetch('http://localhost:8000/list-files');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.files) {
+            setGeneratedFiles(data.files);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to fetch files:", e);
+      }
+    };
+    fetchFiles();
+  }, []);
+
   useEffect(() => {
     document.documentElement.classList.add('dark');
     localStorage.setItem('theme', 'dark');
@@ -143,6 +173,305 @@ function App() {
   const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState(false);
   const [terminalHeight, setTerminalHeight] = useState(250);
   const [isTerminalOpen, setIsTerminalOpen] = useState(true);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [createModalType, setCreateModalType] = useState<'file' | 'folder'>('file');
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
+  const plusButtonRef = useRef<HTMLButtonElement>(null);
+
+  const toggleMenu = () => {
+    if (isHeaderMenuOpen) {
+      setIsHeaderMenuOpen(false);
+      return;
+    }
+
+    if (plusButtonRef.current) {
+      const rect = plusButtonRef.current.getBoundingClientRect();
+      // Position to the right of the button
+      setMenuPos({
+        top: rect.top,
+        left: rect.right + 8
+      });
+      setIsHeaderMenuOpen(true);
+    }
+  };
+
+  useEffect(() => {
+    const handleScroll = () => {
+      if (isHeaderMenuOpen) setIsHeaderMenuOpen(false);
+    };
+    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('resize', handleScroll);
+    return () => {
+      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('resize', handleScroll);
+    }
+  }, [isHeaderMenuOpen]);
+
+
+  const [contextMenu, setContextMenu] = useState<{ isOpen: boolean; x: number; y: number; path: string; type: 'file' | 'folder' | null }>({
+    isOpen: false,
+    x: 0,
+    y: 0,
+    path: '',
+    type: null
+  });
+
+  useEffect(() => {
+    const handleClick = () => {
+      if (contextMenu.isOpen) setContextMenu({ ...contextMenu, isOpen: false });
+    };
+    window.addEventListener('click', handleClick);
+    return () => window.removeEventListener('click', handleClick);
+  }, [contextMenu.isOpen]);
+
+  const handleContextMenu = (path: string, type: 'file' | 'folder', e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation(); // Stop bubbling
+    setContextMenu({
+      isOpen: true,
+      x: e.pageX,
+      y: e.pageY,
+      path: path,
+      type: type
+    });
+  };
+
+  const [creationPath, setCreationPath] = useState('');
+
+  const [actionMenu, setActionMenu] = useState<{ isOpen: boolean; x: number; y: number; path: string }>({
+    isOpen: false,
+    x: 0,
+    y: 0,
+    path: ''
+  });
+
+  const [deleteModal, setDeleteModal] = useState<{ isOpen: boolean; path: string }>({ isOpen: false, path: '' });
+  const [renameModal, setRenameModal] = useState<{ isOpen: boolean; path: string }>({ isOpen: false, path: '' });
+  const [duplicateModal, setDuplicateModal] = useState<{ isOpen: boolean; path: string }>({ isOpen: false, path: '' });
+  const [alertModal, setAlertModal] = useState<{ isOpen: boolean; title: string; message: string }>({ isOpen: false, title: '', message: '' });
+
+  const handleActionMenu = (path: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setActionMenu({
+      isOpen: true,
+      x: e.pageX,
+      y: e.pageY,
+      path: path
+    });
+  };
+
+  const handleDelete = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/delete-item', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: deleteModal.path })
+      });
+      if (!response.ok) throw new Error('Delete failed');
+      setDeleteModal({ isOpen: false, path: '' });
+
+      const newFiles = { ...generatedFiles };
+      Object.keys(newFiles).forEach(k => {
+        if (k === deleteModal.path || k.startsWith(deleteModal.path + '/')) {
+          delete newFiles[k];
+        }
+      });
+      setGeneratedFiles(newFiles);
+
+
+      const newOpenFiles = openFiles.filter(f => f !== deleteModal.path && !f.startsWith(deleteModal.path + '/'));
+      setOpenFiles(newOpenFiles);
+
+
+      if (selectedFile === deleteModal.path || selectedFile?.startsWith(deleteModal.path + '/')) {
+        setSelectedFile(null);
+      }
+
+    } catch (error) {
+      console.error("Delete failed", error);
+      alert("Failed to delete item: " + error);
+    }
+  };
+
+  const handleRename = async (newName: string) => {
+    const oldPath = renameModal.path;
+    const parent = oldPath.substring(0, oldPath.lastIndexOf('/'));
+    const newPath = parent ? `${parent}/${newName}` : newName;
+
+    try {
+      const response = await fetch('http://localhost:8000/rename-item', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ old_path: oldPath, new_path: newPath })
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+
+      setRenameModal({ isOpen: false, path: '' });
+
+      const newFiles = { ...generatedFiles };
+
+      Object.keys(newFiles).forEach(k => {
+        if (k === oldPath) {
+          newFiles[newPath] = newFiles[k];
+          delete newFiles[k];
+        } else if (k.startsWith(oldPath + '/')) {
+          const suffix = k.substring(oldPath.length);
+          newFiles[newPath + suffix] = newFiles[k];
+          delete newFiles[k];
+        }
+      });
+      setGeneratedFiles(newFiles);
+
+
+      setOpenFiles(prev => prev.map(f => {
+        if (f === oldPath) return newPath;
+        if (f.startsWith(oldPath + '/')) return newPath + f.substring(oldPath.length);
+        return f;
+      }));
+
+
+      if (selectedFile === oldPath) setSelectedFile(newPath);
+      else if (selectedFile?.startsWith(oldPath + '/')) {
+        setSelectedFile(newPath + selectedFile.substring(oldPath.length));
+      }
+
+    } catch (error) {
+      alert(error);
+    }
+  };
+
+  const handleMoveItem = async (sourcePath: string, targetPath: string) => {
+    // Calculate new path
+    const basename = sourcePath.split('/').pop();
+    if (!basename) return;
+    const newPath = targetPath ? `${targetPath}/${basename}` : basename;
+
+    if (newPath === sourcePath) return;
+
+    try {
+      const response = await fetch('http://localhost:8000/rename-item', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ old_path: sourcePath, new_path: newPath })
+      });
+
+      if (!response.ok) {
+        // HTTP error (500 etc)
+        const data = await response.json();
+        console.error("Move error:", data);
+        setAlertModal({
+          isOpen: true,
+          title: "Move Failed",
+          message: data.error || "An unknown error occurred while moving the item."
+        });
+        return;
+      }
+
+      const data = await response.json();
+      if (data.error) {
+        console.error("Move business error:", data);
+        if (data.error === "Destination already exists") {
+          setAlertModal({
+            isOpen: true,
+            title: "Cannot Move Item",
+            message: `A file or folder with the name '${basename}' already exists in the destination folder. The item remains in its original location.`
+          });
+        } else {
+          setAlertModal({
+            isOpen: true,
+            title: "Move Failed",
+            message: data.error || "An unknown error occurred while moving the item."
+          });
+        }
+        return;
+      }
+
+      // Update local state
+      const newFiles = { ...generatedFiles };
+
+      Object.keys(newFiles).forEach(k => {
+        if (k === sourcePath) {
+          newFiles[newPath] = newFiles[k];
+          delete newFiles[k];
+        } else if (k.startsWith(sourcePath + '/')) {
+          const suffix = k.substring(sourcePath.length);
+          newFiles[newPath + suffix] = newFiles[k];
+          delete newFiles[k];
+        }
+      });
+      setGeneratedFiles(newFiles);
+
+      // Update refs
+      setOpenFiles(prev => prev.map(f => {
+        if (f === sourcePath) return newPath;
+        if (f.startsWith(sourcePath + '/')) return newPath + f.substring(sourcePath.length);
+        return f;
+      }));
+
+      if (selectedFile === sourcePath) setSelectedFile(newPath);
+      else if (selectedFile && selectedFile.startsWith(sourcePath + '/')) {
+        setSelectedFile(newPath + selectedFile.substring(sourcePath.length));
+      }
+
+    } catch (e) {
+      console.error("Move exception:", e);
+    }
+  };
+
+  const handleDuplicate = async (newName: string) => {
+    const sourcePath = duplicateModal.path;
+    const parent = sourcePath.substring(0, sourcePath.lastIndexOf('/'));
+    const newPath = parent ? `${parent}/${newName}` : newName;
+
+    try {
+      const response = await fetch('http://localhost:8000/duplicate-item', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_path: sourcePath, new_path: newPath })
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+
+      setDuplicateModal({ isOpen: false, path: '' });
+
+      const newFiles = { ...generatedFiles };
+
+      Object.keys(newFiles).forEach(k => {
+        if (k === sourcePath) {
+          newFiles[newPath] = newFiles[k];
+        } else if (k.startsWith(sourcePath + '/')) {
+          const suffix = k.substring(sourcePath.length);
+          newFiles[newPath + suffix] = newFiles[k];
+        }
+      });
+      setGeneratedFiles(newFiles);
+
+    } catch (error) {
+      alert(error);
+    }
+  };
+
+  const [deleteAllModal, setDeleteAllModal] = useState(false);
+
+  const handleDeleteAll = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/delete-all', { method: 'POST' });
+      if (!response.ok) throw new Error('Failed to delete all');
+      setGeneratedFiles({});
+      setOpenFiles([]);
+      setSelectedFile(null);
+      setDeleteAllModal(false);
+      // Clear all tabs
+      // Since tabManager is not state, we assume tabs are cleared by openFiles change or we need to clear them if managed in state?
+      // Looking at tabManager usage, it seems to be just a helper or derived.
+      // Re-reading code: tabManager was used in FileExplorer select.
+    } catch (e) {
+      console.error(e);
+      alert("Failed to delete all");
+    }
+  };
 
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<any>(null);
@@ -195,9 +524,7 @@ function App() {
     if (!prompt.trim()) return;
     setIsProcessing(true);
     setTimeline([]);
-    setGeneratedFiles({});
-    setOpenFiles([]);
-    setSelectedFile(null);
+    // Do not clear files to prevent flicker and loss of context
 
     if (wsRef.current) wsRef.current.close();
 
@@ -434,43 +761,240 @@ function App() {
     setTimeout(() => setIsRunning(false), 300);
   };
 
+
+
+  const handleSave = async (filename: string, content: string) => {
+    try {
+      const response = await fetch('http://localhost:8000/save-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename, content }),
+      });
+      const data = await response.json();
+      if (data.error) {
+        alert('Error saving file: ' + data.error);
+      } else {
+        console.log('Saved successfully');
+      }
+    } catch (e) {
+      alert('Network error saving file: ' + e);
+    }
+  };
+
+  const handleCreateFile = (filename: string) => {
+    // 1. Add to generatedFiles (empty content)
+    setGeneratedFiles(prev => ({
+      ...prev,
+      [filename]: ''
+    }));
+
+    // 2. Add to openFiles if not present
+    if (!openFiles.includes(filename)) {
+      setOpenFiles(prev => [...prev, filename]);
+    }
+
+    // 3. Select it
+    setSelectedFile(filename);
+
+    // 4. Ideally save empty file to backend so it exists for build/run
+    handleSave(filename, "");
+  };
+
+  const handleCreateFolder = async (folderName: string) => {
+    try {
+      const response = await fetch('http://localhost:8000/create-folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: folderName }),
+      });
+      const data = await response.json();
+
+      if (data.error) {
+        alert('Error creating folder: ' + data.error);
+      } else {
+        // Update generatedFiles to include the .keep file so it shows in explorer
+        setGeneratedFiles(prev => ({
+          ...prev,
+          [`${folderName}/.keep`]: ''
+        }));
+      }
+    } catch (e) {
+      alert('Network error creating folder: ' + e);
+    }
+  };
+
   return (
     <div className="h-screen bg-background text-foreground font-sans flex flex-col overflow-hidden transition-colors duration-300">
       <div className="flex-1 flex min-h-0">
         <aside className="w-80 lg:w-96 border-r border-border bg-card flex flex-col shrink-0">
-          <div className="p-4 border-b border-border/50">
+          <div className="p-4 border-b border-border/50 relative z-[100]">
             <div className="flex items-center justify-between mb-4 relative z-50">
               <h2 className="text-xl font-black tracking-tight bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
                 OpenSyntax
               </h2>
               <div className="relative">
                 <button
-                  onClick={() => setIsHeaderMenuOpen(!isHeaderMenuOpen)}
-                  className="p-1 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors"
+                  ref={plusButtonRef}
+                  onClick={toggleMenu}
+                  className={cn(
+                    "p-1 rounded-md transition-colors",
+                    isHeaderMenuOpen ? "bg-muted text-foreground" : "hover:bg-muted text-muted-foreground hover:text-foreground"
+                  )}
                   title="New..."
                 >
                   <Plus className="w-4 h-4" />
                 </button>
-                <AnimatePresence>
-                  {isHeaderMenuOpen && (
-                    <motion.div
-                      initial={{ opacity: 0, y: 5, scale: 0.95 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      exit={{ opacity: 0, y: 5, scale: 0.95 }}
-                      className="absolute right-0 top-full mt-1 w-32 bg-zinc-950 border border-border/50 rounded-xl shadow-xl overflow-hidden py-1 z-50"
+
+                {isHeaderMenuOpen && (
+                  <Portal>
+                    <div
+                      className="fixed inset-0 z-[99]"
+                      onClick={() => setIsHeaderMenuOpen(false)}
+                      style={{ backgroundColor: 'transparent' }}
+                    />
+                    <div
+                      className="fixed w-48 bg-zinc-950 border border-border rounded-xl shadow-2xl z-[100] overflow-hidden"
+                      style={{
+                        top: menuPos.top,
+                        left: menuPos.left,
+                      }}
                     >
-                      <button
-                        onClick={() => { setIsTerminalOpen(true); setIsHeaderMenuOpen(false); }}
-                        className="w-full text-left px-3 py-2 text-xs font-medium hover:bg-muted/50 text-muted-foreground hover:text-foreground flex items-center gap-2"
-                      >
-                        <Terminal className="w-3.5 h-3.5" />
-                        Terminal
-                      </button>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
+                      <div className="p-1 flex flex-col gap-0.5">
+                        <button
+                          onClick={() => {
+                            setIsHeaderMenuOpen(false);
+                            setCreationPath('');
+                            setCreateModalType('file');
+                            setIsCreateModalOpen(true);
+                          }}
+                          className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors w-full text-left"
+                        >
+                          <FileCode className="w-3.5 h-3.5" />
+                          New File...
+                        </button>
+                        <button
+                          onClick={() => {
+                            setIsHeaderMenuOpen(false);
+                            setCreationPath('');
+                            setCreateModalType('folder');
+                            setIsCreateModalOpen(true);
+                          }}
+                          className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors w-full text-left"
+                        >
+                          <FolderPlus className="w-3.5 h-3.5" />
+                          New Folder...
+                        </button>
+                        <button
+                          onClick={() => {
+                            setIsHeaderMenuOpen(false);
+                            if (!isTerminalOpen) {
+                              setIsTerminalOpen(true);
+                            }
+                          }}
+                          className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors w-full text-left"
+                        >
+                          <Terminal className="w-3.5 h-3.5" />
+                          New Terminal
+                        </button>
+                      </div>
+                    </div>
+                  </Portal>
+                )}
               </div>
             </div>
+
+            {/* Context Menu Portal */}
+            {contextMenu.isOpen && (
+              <Portal>
+                <div
+                  className="fixed z-[9999] min-w-[160px] bg-zinc-950 border border-border rounded-xl shadow-2xl p-1 flex flex-col gap-0.5 overflow-hidden animation-in fade-in zoom-in-95 duration-100"
+                  style={{ top: contextMenu.y, left: contextMenu.x }}
+                  onClick={(e) => e.stopPropagation()}
+                  onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                >
+                  <button
+                    onClick={() => {
+                      const isFile = contextMenu.type === 'file';
+                      // If it's a file, create in its parent. If folder, create in it.
+                      // If root (path empty), create in root.
+                      const parentPath = isFile && contextMenu.path.includes('/')
+                        ? contextMenu.path.substring(0, contextMenu.path.lastIndexOf('/'))
+                        : isFile ? '' : contextMenu.path;
+
+                      setCreationPath(parentPath);
+                      setCreateModalType('file');
+                      setIsCreateModalOpen(true);
+                      setContextMenu({ ...contextMenu, isOpen: false });
+                    }}
+                    className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors w-full text-left"
+                  >
+                    <FileCode className="w-3.5 h-3.5" />
+                    New File...
+                  </button>
+                  <button
+                    onClick={() => {
+                      const isFile = contextMenu.type === 'file';
+                      const parentPath = isFile && contextMenu.path.includes('/')
+                        ? contextMenu.path.substring(0, contextMenu.path.lastIndexOf('/'))
+                        : isFile ? '' : contextMenu.path;
+
+                      setCreationPath(parentPath);
+                      setCreateModalType('folder');
+                      setIsCreateModalOpen(true);
+                      setContextMenu({ ...contextMenu, isOpen: false });
+                    }}
+                    className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors w-full text-left"
+                  >
+                    <FolderPlus className="w-3.5 h-3.5" />
+                    New Folder...
+                  </button>
+
+                  {contextMenu.path && (
+                    <>
+                      <div className="h-px bg-border/50 my-0.5" />
+
+                      <button
+                        onClick={() => {
+                          setRenameModal({ isOpen: true, path: contextMenu.path });
+                          setContextMenu({ ...contextMenu, isOpen: false });
+                        }}
+                        className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors w-full text-left"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                        Rename
+                      </button>
+                      <button
+                        onClick={() => {
+                          setDuplicateModal({ isOpen: true, path: contextMenu.path });
+                          setContextMenu({ ...contextMenu, isOpen: false });
+                        }}
+                        className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors w-full text-left"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        Duplicate
+                      </button>
+                      <button
+                        onClick={() => {
+                          setDeleteModal({ isOpen: true, path: contextMenu.path });
+                          setContextMenu({ ...contextMenu, isOpen: false });
+                        }}
+                        className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-red-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors w-full text-left"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Delete
+                      </button>
+                    </>
+                  )}
+                </div>
+                {/* Backdrop to close */}
+                <div
+                  className="fixed inset-0 z-[9998]"
+                  onClick={() => setContextMenu({ ...contextMenu, isOpen: false })}
+                  onContextMenu={(e) => { e.preventDefault(); setContextMenu({ ...contextMenu, isOpen: false }); }}
+                />
+              </Portal>
+            )}
+
             <div className="space-y-3">
               <div className="flex p-1 bg-muted/50 rounded-2xl relative isolate">
                 <div className="absolute inset-1 pointer-events-none">
@@ -596,56 +1120,97 @@ function App() {
                 <AgentStatus timeline={timeline} />
               </div>
             ) : (
-              <div className="flex-1 overflow-auto p-4 space-y-1 custom-scrollbar">
-                {Object.keys(generatedFiles).length > 0 && (
-                  <div className="mb-4">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="w-full gap-2 border-primary/20 hover:bg-primary/10 hover:text-primary transition-colors"
-                      onClick={() => {
-                        const link = document.createElement('a');
-                        link.href = 'http://localhost:8000/download-project';
-                        link.download = 'project_files.zip';
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-                      }}
-                    >
-                      <Download className="w-4 h-4" />
-                      Download Project (.zip)
-                    </Button>
-                  </div>
-                )}
-
-                {Object.keys(generatedFiles).length === 0 ? (
-                  <div className="text-center text-muted-foreground text-sm py-10 flex flex-col items-center gap-2">
-                    <FolderOpen className="w-8 h-8 opacity-20" />
-                    <span>No files generated yet.</span>
-                  </div>
-                ) : (
-                  <FileExplorer
-                    files={buildFileTree(generatedFiles)}
-                    onFileSelect={(path) => {
-                      console.log('onFileSelect called with:', path);
-                      const fullPathKey = Object.keys(generatedFiles).find(k => {
-                        const match = k.endsWith(path) || k === path || path.endsWith(k);
-                        if (match) console.log('Matched key:', k);
-                        return match;
-                      });
-
-                      if (fullPathKey) {
-                        setSelectedFile(fullPathKey);
-                        if (!openFiles.includes(fullPathKey)) {
-                          setOpenFiles(prev => [...prev, fullPathKey]);
+              <>
+                <div
+                  className="flex-1 overflow-y-auto min-h-0 custom-scrollbar p-2 transition-colors duration-200"
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    handleContextMenu('', 'folder', e);
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.dataTransfer.dropEffect = 'move';
+                    e.currentTarget.classList.add('bg-muted/10');
+                  }}
+                  onDragLeave={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.currentTarget.classList.remove('bg-muted/10');
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.currentTarget.classList.remove('bg-muted/10');
+                    const data = e.dataTransfer.getData('application/json');
+                    if (data) {
+                      try {
+                        const { path: sourcePath } = JSON.parse(data);
+                        // Drop on root means target is empty string
+                        // Check if source path is valid
+                        if (sourcePath) {
+                          handleMoveItem(sourcePath, '');
                         }
-                      } else {
-                        console.warn('No match found for path:', path, 'in keys:', Object.keys(generatedFiles));
+                      } catch (err) {
                       }
+                    }
+                  }}
+                >
+                  {Object.keys(generatedFiles).length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-muted-foreground p-4 text-center pointer-events-none">
+                      <p className="text-sm">No files in workspace</p>
+                      <p className="text-xs mt-1 opacity-50">Create a file or run an agent</p>
+                    </div>
+                  ) : (
+                    <FileExplorer
+                      files={buildFileTree(generatedFiles)}
+                      onFileSelect={(path) => {
+                        const fullPathKey = Object.keys(generatedFiles).find(k => {
+                          return k === path || k.endsWith(path);
+                        });
+                        if (fullPathKey || path) {
+                          const target = fullPathKey || path;
+                          setSelectedFile(target);
+                          if (!openFiles.includes(target)) {
+                            setOpenFiles(prev => [...prev, target]);
+                          }
+                        }
+                      }}
+                      onContextMenu={(path, type, e) => handleContextMenu(path, type, e)}
+                      onActionMenu={handleActionMenu}
+                      onMoveItem={handleMoveItem}
+                    />
+                  )}
+
+                </div>
+                <div className="p-2 border-t border-border flex gap-2 shrink-0">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1 gap-2 border-primary/20 hover:bg-primary/10 hover:text-primary transition-colors h-8 text-xs"
+                    onClick={() => {
+                      const link = document.createElement('a');
+                      link.href = 'http://localhost:8000/download-project';
+                      link.download = 'project_files.zip';
+                      document.body.appendChild(link);
+                      link.click();
+                      document.body.removeChild(link);
                     }}
-                  />
-                )}
-              </div>
+                  >
+                    <Download className="w-3 h-3" />
+                    Download
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-2 border-destructive/20 hover:bg-destructive/10 hover:text-destructive transition-colors h-8 text-xs px-3"
+                    onClick={() => setDeleteAllModal(true)}
+                    title="Delete All Files"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </Button>
+                </div>
+              </>
             )}
           </div>
         </aside>
@@ -683,12 +1248,15 @@ function App() {
             </AnimatePresence>
           </div>
 
-          <div className="flex-1 overflow-auto relative bg-background custom-scrollbar">
+          <div className={cn("flex-1 relative bg-background custom-scrollbar flex flex-col", (selectedFile?.endsWith('.md') || !selectedFile) ? "overflow-auto" : "overflow-hidden")}>
             {selectedFile ? (
-              <div className="min-h-full">
+              <div className={cn("flex flex-col", (selectedFile?.endsWith('.md') || !selectedFile) ? "min-h-full" : "h-full")}>
                 <div className="sticky top-0 z-10 bg-background/95 backdrop-blur border-b border-border/40 px-6 py-2 flex items-center justify-between">
                   <span className="text-xs text-muted-foreground font-mono">{selectedFile}</span>
                   <div className="flex items-center gap-2">
+                    <button onClick={() => handleSave(selectedFile, generatedFiles[selectedFile])} className="p-1.5 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors" title="Save (Ctrl+S)">
+                      <Save className="w-3.5 h-3.5" />
+                    </button>
                     <button onClick={(e) => handleCopy(e, selectedFile, generatedFiles[selectedFile])} className="p-1.5 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors" title="Copy content">
                       {copiedFile === selectedFile ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
                     </button>
@@ -712,15 +1280,18 @@ function App() {
                     <ReactMarkdown>{generatedFiles[selectedFile] || ''}</ReactMarkdown>
                   </div>
                 ) : (
-                  <div className="text-sm font-mono leading-relaxed overflow-hidden h-full">
-                    <SyntaxHighlighter
-                      language={selectedFile.endsWith('.py') ? 'python' : selectedFile.endsWith('.tsx') ? 'tsx' : selectedFile.endsWith('.ts') ? 'typescript' : selectedFile.endsWith('.css') ? 'css' : 'javascript'}
-                      style={vscDarkPlus}
-                      customStyle={{ margin: 0, borderRadius: 0, height: '100%', background: 'transparent', padding: '1.5rem' }}
-                      showLineNumbers={true}
-                    >
-                      {generatedFiles[selectedFile] || ''}
-                    </SyntaxHighlighter>
+                  <div className="flex-1 min-h-0">
+                    <CodeEditor
+                      filename={selectedFile}
+                      content={generatedFiles[selectedFile] || ''}
+                      onChange={(value) => {
+                        setGeneratedFiles(prev => ({
+                          ...prev,
+                          [selectedFile]: value || ''
+                        }));
+                      }}
+                      onSave={() => handleSave(selectedFile, generatedFiles[selectedFile])}
+                    />
                   </div>
                 )}
               </div>
@@ -743,6 +1314,121 @@ function App() {
               xtermRef={terminalRef}
             />
           )}
+
+          <CreateFileModal
+            isOpen={isCreateModalOpen}
+            onClose={() => setIsCreateModalOpen(false)}
+            onCreate={(name) => {
+              const fullName = creationPath ? `${creationPath}/${name}` : name;
+              if (createModalType === 'file') {
+                handleCreateFile(fullName);
+              } else {
+                handleCreateFolder(fullName);
+              }
+            }}
+            type={createModalType}
+            currentPath={creationPath}
+            existingPaths={Object.keys(generatedFiles)}
+          />
+
+          <FileActionMenu
+            isOpen={actionMenu.isOpen}
+            x={actionMenu.x}
+            y={actionMenu.y}
+            onClose={() => setActionMenu({ ...actionMenu, isOpen: false })}
+            onRename={() => setRenameModal({ isOpen: true, path: actionMenu.path })}
+            onDuplicate={() => setDuplicateModal({ isOpen: true, path: actionMenu.path })}
+            onDelete={() => setDeleteModal({ isOpen: true, path: actionMenu.path })}
+          />
+
+          <ConfirmationModal
+            isOpen={deleteAllModal}
+            title="Delete All Files"
+            message="Are you sure you want to delete ALL files and folders in the workspace? This action cannot be undone."
+            confirmLabel="Delete All"
+            onClose={() => setDeleteAllModal(false)}
+            onConfirm={handleDeleteAll}
+            isDestructive
+          />
+
+          <ConfirmationModal
+            isOpen={deleteModal.isOpen}
+            title="Delete Item"
+            message={`Are you sure you want to delete '${deleteModal.path}'? This action cannot be undone.`}
+            confirmLabel="Delete"
+            isDestructive
+            onClose={() => setDeleteModal({ ...deleteModal, isOpen: false })}
+            onConfirm={handleDelete}
+          />
+
+          <ConfirmationModal
+            isOpen={alertModal.isOpen}
+            title={alertModal.title}
+            message={alertModal.message}
+            confirmLabel="OK"
+            onClose={() => setAlertModal({ ...alertModal, isOpen: false })}
+            onConfirm={() => setAlertModal({ ...alertModal, isOpen: false })}
+            isAlert
+          />
+
+          <NameInputModal
+            isOpen={renameModal.isOpen}
+            title="Rename Item"
+            initialValue={renameModal.path.split('/').pop() || ''}
+            mode="rename"
+            isFile={(() => {
+              // Heuristic: if it has an extension that we know, or assume file if simple file node (hard to know for sure without checking fileTree)
+              // But typically renames keep type.
+              // We can check if extension is present in current name.
+              return (renameModal.path.split('/').pop() || '').includes('.');
+            })()}
+            onClose={() => setRenameModal({ ...renameModal, isOpen: false })}
+            onSubmit={handleRename}
+            existingNames={
+              Object.keys(generatedFiles)
+                .map(p => {
+                  const parent = renameModal.path.includes('/') ? renameModal.path.substring(0, renameModal.path.lastIndexOf('/')) : '';
+                  if (p.startsWith(parent + '/') || (parent === '' && !p.includes('/'))) {
+                    // sibling
+                    // extract basename
+                    const parts = p.split('/');
+                    return parts[parts.length - 1];
+                  }
+                  if (parent === '' && !p.includes('/')) return p;
+                  return null;
+                })
+                .filter((p): p is string => p !== null)
+            }
+          />
+
+          <NameInputModal
+            isOpen={duplicateModal.isOpen}
+            title="Duplicate Item"
+            initialValue={() => {
+              const name = duplicateModal.path.split('/').pop() || '';
+              const lastDotIndex = name.lastIndexOf('.');
+              if (lastDotIndex > 0) {
+                const base = name.substring(0, lastDotIndex);
+                const ext = name.substring(lastDotIndex);
+                return `${base}_copy${ext}`;
+              }
+              return name + '_copy';
+            }}
+            mode="duplicate"
+            isFile={(duplicateModal.path.split('/').pop() || '').includes('.')} // Simple heuristic
+            onClose={() => setDuplicateModal({ ...duplicateModal, isOpen: false })}
+            onSubmit={handleDuplicate}
+            existingNames={
+              Object.keys(generatedFiles)
+                .map(p => {
+                  const parent = duplicateModal.path.includes('/') ? duplicateModal.path.substring(0, duplicateModal.path.lastIndexOf('/')) : '';
+                  const pParent = p.includes('/') ? p.substring(0, p.lastIndexOf('/')) : '';
+                  if (pParent === parent) return p.split('/').pop() || '';
+                  return null;
+                })
+                .filter((p): p is string => p !== null)
+            }
+          />
         </main>
       </div >
     </div >
