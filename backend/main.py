@@ -47,7 +47,6 @@ import io
 
 from fastapi.staticfiles import StaticFiles
 
-# Mount persistent workspace for live preview
 os.makedirs("/app/workspace", exist_ok=True)
 app.mount("/preview", StaticFiles(directory="/app/workspace", html=True), name="preview")
 
@@ -57,19 +56,16 @@ async def download_project():
     if not os.path.exists(base_dir):
         return {"error": "No project files found."}
         
-    # Create in-memory zip
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for root, dirs, files in os.walk(base_dir):
             for file in files:
                 file_path = os.path.join(root, file)
-                # Compute relative path for zip archive
                 arcname = os.path.relpath(file_path, base_dir)
                 zip_file.write(file_path, arcname)
                 
     zip_buffer.seek(0)
     
-    # Save to a temp file
     with tempfile.NamedTemporaryFile(mode='wb', suffix='.zip', delete=False) as tmp_zip:
         tmp_zip.write(zip_buffer.getvalue())
         tmp_zip_path = tmp_zip.name
@@ -117,7 +113,8 @@ async def websocket_endpoint(websocket: WebSocket):
         use_local_llm = request_data.get("use_local_llm", True) 
         api_key = request_data.get("api_key")
         auto_fix = request_data.get("auto_fix", False)
-        config = {"use_local_llm": use_local_llm, "api_key": api_key, "auto_fix": auto_fix}
+        language = request_data.get("language", "Python")
+        config = {"use_local_llm": use_local_llm, "api_key": api_key, "auto_fix": auto_fix, "language": language}
 
         if not prompt:
             await websocket.send_json({"error": "No prompt provided"})
@@ -143,24 +140,20 @@ async def terminal_endpoint(websocket: WebSocket):
     await websocket.accept()
     
     try:
-        # Create PTY
         master_fd, slave_fd = pty.openpty()
         
-        # Ensure workspace exists
         os.makedirs("/app/workspace", exist_ok=True)
 
-        # Spawn shell
         process = subprocess.Popen(
             ["/bin/bash"],
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
             preexec_fn=os.setsid,
-            cwd="/app/workspace",  # Start in persistent workspace
+            cwd="/app/workspace",
             env={**os.environ, "TERM": "xterm-256color"}
         )
         
-        # Close slave fd in parent
         os.close(slave_fd)
         
         loop = asyncio.get_running_loop()
@@ -168,7 +161,6 @@ async def terminal_endpoint(websocket: WebSocket):
         async def read_from_pty():
             try:
                 while True:
-                    # Blocking read in default executor
                     data = await loop.run_in_executor(None, os.read, master_fd, 4096)
                     if not data:
                         break
@@ -186,7 +178,6 @@ async def terminal_endpoint(websocket: WebSocket):
             except Exception:
                 pass
 
-        # Run both tasks
         write_task = asyncio.create_task(write_to_pty())
         read_task = asyncio.create_task(read_from_pty())
         
@@ -202,7 +193,6 @@ async def terminal_endpoint(websocket: WebSocket):
         print(f"Terminal Error: {e}")
         await websocket.close()
     finally:
-        # Cleanup
         try:
             process.terminate()
             process.wait()

@@ -1,13 +1,19 @@
-# filename: README.md
-# Merge Sort Implementation
+# Merge Sort Implementation in Python
 
-This repository contains a pure Python implementation of the **Merge Sort** algorithm.
+This repository contains a clean, efficient, and well-structured implementation of the **Merge Sort** algorithm in Python.
 
 ## Features
-- Implements a top-down recursive merge sort.
-- Returns a new sorted array (preserves original).
-- Stable sort: equal elements maintain relative order.
-- O(n log n) time complexity, O(n) space complexity.
-- Clean separation of concerns: `main.py` for entry point, `utils.py` for core algorithm.
+
+- **Pure Python**: No external dependencies required.
+- **Stable Sort**: Equal elements maintain their relative order.
+- **Time Complexity**: O(n log n) in all cases.
+- **Space Complexity**: O(n) — due to temporary arrays used during merging.
+- **Tested**: Includes a comprehensive test suite.
 
 ## Usage
+
+1. Save all files in a directory.
+2. Run `python main.py` to test the algorithm.
+3. Run `python -m tests.test_merge_sort` to run tests.
+
+## File Structure

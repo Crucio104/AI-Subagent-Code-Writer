@@ -1,17 +1,93 @@
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
-// remark-gfm removed to fix build error
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import 'github-markdown-css/github-markdown.css'
 import { Button } from './components/ui/button'
 import { AgentStatus } from './components/AgentStatus'
-import { FileCode, Terminal, MonitorPlay, ArrowRight, Bot, FolderOpen, X, Copy, Download, Check, Play, ChevronDown, ChevronUp, RefreshCw, Mic, MicOff } from 'lucide-react'
+import { FileCode, Terminal, MonitorPlay, ArrowRight, Bot, FolderOpen, X, Copy, Download, Check, Play, ChevronDown, ChevronUp, RefreshCw, Mic, MicOff, Hammer, Plus } from 'lucide-react'
 import { Terminal as XTerminal } from './components/Terminal';
 import type { TerminalRef } from './components/Terminal';
 import { cn } from './lib/utils'
 import { FileExplorer } from './components/FileExplorer';
+
+const LANGUAGES = [
+  { id: 'Python', name: 'Python', ext: '.py', color: 'bg-blue-500' },
+  { id: 'JavaScript', name: 'JavaScript', ext: '.js', color: 'bg-yellow-400' },
+  { id: 'TypeScript', name: 'TypeScript', ext: '.ts', color: 'bg-blue-600' },
+  { id: 'Java', name: 'Java', ext: '.java', color: 'bg-orange-600' },
+  { id: 'C++', name: 'C++', ext: '.cpp', color: 'bg-indigo-600' },
+  { id: 'C', name: 'C', ext: '.c', color: 'bg-slate-500' },
+  { id: 'Go', name: 'Go', ext: '.go', color: 'bg-cyan-600' },
+  { id: 'Rust', name: 'Rust', ext: '.rs', color: 'bg-orange-700' },
+] as const;
+
+function LanguageSelector({ value, onChange }: { value: string, onChange: (val: string) => void }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const selectedLang = LANGUAGES.find(l => l.id === value) || LANGUAGES[0];
+
+  return (
+    <div className="relative mb-3 z-50 text-left" ref={containerRef}>
+      <motion.button
+        onClick={() => setIsOpen(!isOpen)}
+        className={cn(
+          "w-full flex items-center justify-between bg-muted p-2 rounded-xl border transition-all duration-200",
+          isOpen ? "border-primary/50 bg-muted" : "border-border/40 hover:border-primary/30"
+        )}
+        whileTap={{ scale: 0.98 }}
+      >
+        <div className="flex items-center gap-2.5">
+          <div className={cn("w-2 h-2 rounded-full ring-2 ring-opacity-20", selectedLang.color.replace('bg-', 'ring-'), selectedLang.color)} />
+          <div className="flex flex-col items-start leading-none">
+            <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Language</span>
+            <span className="text-xs font-semibold text-foreground mt-0.5">{selectedLang.name}</span>
+          </div>
+        </div>
+        <ChevronDown className={cn("w-3.5 h-3.5 text-muted-foreground transition-transform duration-300", isOpen && "rotate-180")} />
+      </motion.button>
+
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: -5, scale: 0.95, pointerEvents: 'none' }}
+            animate={{ opacity: 1, y: 0, scale: 1, pointerEvents: 'auto' }}
+            exit={{ opacity: 0, y: -5, scale: 0.95, pointerEvents: 'none' }}
+            transition={{ duration: 0.15, ease: "easeOut" }}
+            className="absolute top-full left-0 right-0 mt-1.5 p-1 bg-zinc-950 border border-border/50 rounded-xl shadow-xl flex flex-col gap-0.5 overflow-hidden z-[60]"
+          >
+            {LANGUAGES.map((lang) => (
+              <button
+                key={lang.id}
+                onClick={() => { onChange(lang.id); setIsOpen(false); }}
+                className={cn(
+                  "flex items-center gap-3 w-full px-3 py-2 rounded-lg text-xs font-medium transition-colors",
+                  value === lang.id ? "bg-primary/10 text-primary" : "hover:bg-muted/50 text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <div className={cn("w-1.5 h-1.5 rounded-full", lang.color)} />
+                <span>{lang.name}</span>
+                {value === lang.id && <Check className="w-3 h-3 ml-auto" />}
+              </button>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
 
 interface LogItem {
   agent_name: string;
@@ -23,11 +99,9 @@ interface LogItem {
 
 const socketUrl = 'ws://localhost:8000/generate';
 
-// Helper to convert flat path map to nested tree
 const buildFileTree = (files: { [key: string]: string }) => {
   const root: any = {};
   Object.keys(files).forEach(path => {
-    // Clean path (remove leading slash)
     const cleanPath = path.startsWith('/') ? path.slice(1) : path;
     const parts = cleanPath.split('/');
 
@@ -53,6 +127,7 @@ function App() {
   const [useLocalLLM, setUseLocalLLM] = useState(true)
   const [sidebarTab, setSidebarTab] = useState<'activity' | 'files'>('activity');
   const [openFiles, setOpenFiles] = useState<string[]>([]);
+  const [language, setLanguage] = useState('Python');
   const wsRef = useRef<WebSocket | null>(null);
   const terminalRef = useRef<TerminalRef>(null);
   const lastTestLogLenRef = useRef(0);
@@ -65,9 +140,10 @@ function App() {
   const [openAiKey, setOpenAiKey] = useState('');
   const [showKeyInput, setShowKeyInput] = useState(false);
   const [autoFix, setAutoFix] = useState(false);
-  const [terminalHeight, setTerminalHeight] = useState(192);
+  const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState(false);
+  const [terminalHeight, setTerminalHeight] = useState(250);
+  const [isTerminalOpen, setIsTerminalOpen] = useState(true);
 
-  // Voice Input Logic
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<any>(null);
 
@@ -133,7 +209,8 @@ function App() {
         prompt,
         use_local_llm: useLocalLLM,
         api_key: !useLocalLLM ? openAiKey : undefined,
-        auto_fix: autoFix
+        auto_fix: autoFix,
+        language: language
       }));
     };
 
@@ -262,42 +339,138 @@ function App() {
   const handleRun = async (e: React.MouseEvent, filename: string) => {
     e.stopPropagation();
     setIsRunning(true);
+    setIsTerminalOpen(true);
 
     if (terminalRef.current) {
       terminalRef.current.sendText('\x03');
       setTimeout(() => {
-        // Run from persistent workspace now
-        terminalRef.current?.sendText(`python /app/workspace/${filename}\r`);
+        const ext = filename.split('.').pop();
+        const dir = filename.includes('/') ? filename.substring(0, filename.lastIndexOf('/')) : '.';
+        const fileBase = filename.split('/').pop() || filename;
+        const name = fileBase.split('.')[0];
+
+        const WORKSPACE_BASE = '/app/workspace';
+        const absDir = dir === '.' ? WORKSPACE_BASE : `${WORKSPACE_BASE}/${dir}`;
+
+        let cmd = '';
+        const cdCmd = `cd ${absDir} &&`;
+
+        switch (ext) {
+          case 'py':
+            cmd = `${cdCmd} python3 ${absDir}/${fileBase}`;
+            break;
+          case 'js':
+          case 'ts':
+            cmd = `echo "Execution disabled for JavaScript/TypeScript files."`;
+            break;
+          case 'cpp':
+          case 'cc':
+            cmd = `${cdCmd} g++ ${absDir}/*.${ext} -o ${absDir}/${name} && ${absDir}/${name}`;
+            break;
+          case 'c':
+            cmd = `${cdCmd} gcc ${absDir}/*.c -o ${absDir}/${name} && ${absDir}/${name}`;
+            break;
+          case 'java':
+            cmd = `${cdCmd} javac ${absDir}/*.java && java -cp ${absDir} ${name}`;
+            break;
+          case 'go':
+            cmd = `${cdCmd} (test -f go.mod || (go mod init myproject && go mod tidy)) && go run .`;
+            break;
+          case 'rs':
+            cmd = `${cdCmd} rustc -A warnings ${absDir}/${fileBase} -o ${absDir}/${name} && ${absDir}/${name}`;
+            break;
+          default:
+            cmd = `echo "No execution logic for .${ext} files"`;
+        }
+
+        terminalRef.current?.sendText(`${cmd}\r`);
       }, 50);
     }
     setTimeout(() => setIsRunning(false), 300);
   };
 
+  const handleBuild = (e: React.MouseEvent, filename: string) => {
+    e.stopPropagation();
+    if (isRunning || !terminalRef.current) return;
+
+    setIsRunning(true);
+    setIsTerminalOpen(true);
+    terminalRef.current.sendText('\x03');
+    setTimeout(() => {
+      const ext = filename.split('.').pop();
+      const dir = filename.includes('/') ? filename.substring(0, filename.lastIndexOf('/')) : '.';
+      const fileBase = filename.split('/').pop() || filename;
+      const name = fileBase.split('.')[0];
+
+      const WORKSPACE_BASE = '/app/workspace';
+      const absDir = dir === '.' ? WORKSPACE_BASE : `${WORKSPACE_BASE}/${dir}`;
+
+      let cmd = '';
+      const cdCmd = `cd ${absDir} &&`;
+
+      switch (ext) {
+        case 'cpp':
+        case 'cc':
+          cmd = `${cdCmd} g++ ${absDir}/*.${ext} -o ${absDir}/${name} && echo "Build Complete: ${absDir}/${name}"`;
+          break;
+        case 'c':
+          cmd = `${cdCmd} gcc ${absDir}/*.c -o ${absDir}/${name} && echo "Build Complete: ${absDir}/${name}"`;
+          break;
+        case 'java':
+          cmd = `${cdCmd} javac ${absDir}/*.java && echo "Build Complete: ${absDir}/${name}.class"`;
+          break;
+        case 'go':
+          cmd = `${cdCmd} (test -f go.mod || (go mod init myproject && go mod tidy)) && go build -o ${absDir}/${name} . && echo "Build Complete: ${absDir}/${name}"`;
+          break;
+        case 'rs':
+          cmd = `${cdCmd} rustc -A warnings ${absDir}/${fileBase} -o ${absDir}/${name} && echo "Build Complete: ${absDir}/${name}"`;
+          break;
+        default:
+          cmd = `echo "No build step for .${ext} files"`;
+      }
+
+      terminalRef.current?.sendText(`${cmd}\r`);
+    }, 50);
+    setTimeout(() => setIsRunning(false), 300);
+  };
+
   return (
     <div className="h-screen bg-background text-foreground font-sans flex flex-col overflow-hidden transition-colors duration-300">
-      {/* Header */}
-      <header className="h-14 border-b border-border flex items-center px-6 justify-between bg-card z-10 shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-xl bg-primary text-primary-foreground flex items-center justify-center font-bold text-lg">
-            Ag
-          </div>
-          <div>
-            <h1 className="font-semibold text-sm leading-tight">AgentForge</h1>
-            <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-medium">Workspace</p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full bg-muted/50 text-muted-foreground">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-          System Ready
-        </div>
-      </header>
-
       <div className="flex-1 flex min-h-0">
-        {/* Sidebar */}
         <aside className="w-80 lg:w-96 border-r border-border bg-card flex flex-col shrink-0">
           <div className="p-4 border-b border-border/50">
-            <p className="text-xs font-medium text-muted-foreground mb-3 uppercase tracking-wider">New Task</p>
+            <div className="flex items-center justify-between mb-4 relative z-50">
+              <h2 className="text-xl font-black tracking-tight bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
+                OpenSyntax
+              </h2>
+              <div className="relative">
+                <button
+                  onClick={() => setIsHeaderMenuOpen(!isHeaderMenuOpen)}
+                  className="p-1 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors"
+                  title="New..."
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+                <AnimatePresence>
+                  {isHeaderMenuOpen && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 5, scale: 0.95 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: 5, scale: 0.95 }}
+                      className="absolute right-0 top-full mt-1 w-32 bg-zinc-950 border border-border/50 rounded-xl shadow-xl overflow-hidden py-1 z-50"
+                    >
+                      <button
+                        onClick={() => { setIsTerminalOpen(true); setIsHeaderMenuOpen(false); }}
+                        className="w-full text-left px-3 py-2 text-xs font-medium hover:bg-muted/50 text-muted-foreground hover:text-foreground flex items-center gap-2"
+                      >
+                        <Terminal className="w-3.5 h-3.5" />
+                        Terminal
+                      </button>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </div>
             <div className="space-y-3">
               <div className="flex p-1 bg-muted/50 rounded-2xl relative isolate">
                 <div className="absolute inset-1 pointer-events-none">
@@ -343,8 +516,11 @@ function App() {
                       <input type="password" placeholder="sk-..." value={openAiKey} onChange={(e) => setOpenAiKey(e.target.value)} className="w-full text-xs p-2 rounded-xl bg-muted/30 border border-border/50 focus:outline-none focus:border-primary/50 transition-colors font-mono" />
                     </div>
                   </motion.div>
+
                 )}
               </AnimatePresence>
+
+              <LanguageSelector value={language} onChange={setLanguage} />
 
               <div className="relative">
                 <textarea
@@ -364,22 +540,27 @@ function App() {
                 </button>
               </div>
 
-              <div className="flex items-center justify-between gap-3">
-                <button onClick={() => setAutoFix(!autoFix)} className={cn("group flex items-center gap-2.5 px-4 py-2.5 rounded-xl text-xs font-semibold transition-all duration-300 border", autoFix ? "bg-primary text-primary-foreground border-primary shadow-[0_4px_12px_rgba(var(--primary),0.25)] hover:shadow-[0_4px_16px_rgba(var(--primary),0.4)]" : "bg-muted/40 text-muted-foreground border-border/50 hover:bg-muted/60 hover:text-foreground hover:border-border")}>
-                  <RefreshCw className={cn("w-3.5 h-3.5 transition-transform duration-500", autoFix ? "rotate-180" : "group-hover:rotate-90")} />
-                  <span>Auto-Fix Loop</span>
-                </button>
-                <span className={cn("text-[10px] font-medium uppercase tracking-wider transition-colors duration-300", autoFix ? "text-primary" : "text-muted-foreground/50")}>
-                  {autoFix ? "Retry Enabled" : "Single Pass"}
-                </span>
-              </div>
-              <div className="flex gap-2">
-                <Button className="flex-1 justify-between group transition-colors" onClick={startGeneration} disabled={!prompt}>
-                  <span>{isProcessing ? "Restart Generation" : "Generate Code"}</span>
+              <div className="flex gap-2 items-stretch">
+                <Button
+                  onClick={() => setAutoFix(!autoFix)}
+                  variant={autoFix ? "default" : "outline"}
+                  className={cn(
+                    "group px-4 gap-2 border shadow-sm transition-all duration-300",
+                    !autoFix && "bg-muted/40 text-muted-foreground border-border/50 hover:bg-muted/60 hover:text-foreground hover:border-border"
+                  )}
+                  title={autoFix ? "Auto-Fix: Enabled (Retry Loop)" : "Auto-Fix: Disabled (Single Pass)"}
+                >
+                  <RefreshCw className={cn("w-4 h-4 transition-transform duration-500", autoFix ? "rotate-180" : "group-hover:rotate-90")} />
+                  <span className="font-semibold tracking-wide">Auto-fix</span>
+                </Button>
+
+                <Button className="flex-1 justify-between group transition-colors shadow-sm" onClick={startGeneration} disabled={!prompt}>
+                  <span className="font-semibold tracking-wide">{isProcessing ? "Restart Generation" : "Generate Code"}</span>
                   <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
                 </Button>
+
                 {isProcessing && (
-                  <Button variant="destructive" size="icon" className="aspect-square rounded-xl" onClick={() => { if (wsRef.current) wsRef.current.close(); setIsProcessing(false); }} title="Stop Generation">
+                  <Button variant="destructive" size="icon" className="aspect-square rounded-xl shadow-sm" onClick={() => { if (wsRef.current) wsRef.current.close(); setIsProcessing(false); }} title="Stop Generation">
                     <X className="w-4 h-4" />
                   </Button>
                 )}
@@ -469,15 +650,11 @@ function App() {
           </div>
         </aside>
 
-        {/* Main Content */}
         <main className="flex-1 bg-muted/10 flex flex-col min-w-0">
           <div className="h-12 border-b border-border bg-background flex items-center px-4 gap-2 overflow-x-auto scrollbar-hide shrink-0">
             <AnimatePresence initial={false} mode="popLayout">
               {openFiles.length === 0 ? (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="text-xs text-muted-foreground flex items-center gap-2 px-2">
-                  <Terminal className="w-3.5 h-3.5" />
-                  Output Terminal
-                </motion.div>
+                null
               ) : (
                 openFiles.map(filename => (
                   <motion.button
@@ -518,8 +695,13 @@ function App() {
                     <button onClick={(e) => handleDownload(e, selectedFile, generatedFiles[selectedFile])} className="p-1.5 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors" title="Download file">
                       <Download className="w-3.5 h-3.5" />
                     </button>
-                    {selectedFile.endsWith('.py') && (
-                      <button onClick={(e) => handleRun(e, selectedFile)} className={cn("p-1.5 hover:bg-emerald-500/10 rounded-md text-muted-foreground hover:text-emerald-500 transition-colors", isRunning && "animate-pulse text-emerald-500")} title="Run Python Script" disabled={isRunning}>
+                    {['cpp', 'cc', 'c', 'java', 'go', 'rs'].some(ext => selectedFile.endsWith('.' + ext)) && (
+                      <button onClick={(e) => handleBuild(e, selectedFile)} className={cn("p-1.5 hover:bg-amber-500/10 rounded-md text-muted-foreground hover:text-amber-500 transition-colors", isRunning && "animate-pulse")} title="Build Only" disabled={isRunning}>
+                        <Hammer className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    {['py', 'cpp', 'cc', 'c', 'java', 'go', 'rs'].some(ext => selectedFile.endsWith('.' + ext)) && (
+                      <button onClick={(e) => handleRun(e, selectedFile)} className={cn("p-1.5 hover:bg-emerald-500/10 rounded-md text-muted-foreground hover:text-emerald-500 transition-colors", isRunning && "animate-pulse text-emerald-500")} title="Run / Compile & Run" disabled={isRunning}>
                         <Play className="w-3.5 h-3.5 fill-current" />
                       </button>
                     )}
@@ -552,16 +734,18 @@ function App() {
             )}
           </div>
 
-          <TerminalPanel
-            title="System Terminal"
-            onClose={() => { }}
-            height={terminalHeight}
-            onHeightChange={setTerminalHeight}
-            xtermRef={terminalRef}
-          />
+          {isTerminalOpen && (
+            <TerminalPanel
+              title="System Terminal"
+              onClose={() => setIsTerminalOpen(false)}
+              height={terminalHeight}
+              onHeightChange={setTerminalHeight}
+              xtermRef={terminalRef}
+            />
+          )}
         </main>
-      </div>
-    </div>
+      </div >
+    </div >
   )
 }
 
@@ -638,60 +822,47 @@ function TerminalPanel({ title, height, onHeightChange, isRunOutput, xtermRef, o
 
       <motion.div
         initial={false}
-        style={{ height: isMinimized ? 40 : height }}
+        style={{ height: isMinimized ? 29 : height }}
         className={cn(
-          "border-t border-border bg-black font-mono text-xs flex flex-col shrink-0 overflow-hidden relative shadow-2xl z-20",
-          isRunOutput ? "text-emerald-400" : "text-green-400"
+          "border-t border-border bg-zinc-950/95 font-mono text-xs flex flex-col shrink-0 overflow-hidden relative shadow-2xl z-20 backdrop-blur-sm",
+          isRunOutput ? "text-emerald-300" : "text-zinc-300"
         )}
       >
         {isResizing && (
           <div className="absolute inset-0 z-50 cursor-row-resize" />
         )}
 
-        <div className="flex items-center gap-2.5 px-4 py-2 border-b border-border/40 bg-gradient-to-r from-muted/30 via-muted/15 to-transparent shrink-0 select-none backdrop-blur-md">
-          <div className="relative flex items-center justify-center">
-            <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center group-hover:bg-primary/20 transition-colors">
-              <Terminal className="w-4 h-4 text-primary" />
+        <div className="flex items-center px-2 border-b border-white/5 bg-gradient-to-r from-[#0f0f11] to-[#09090b] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.02)] shrink-0 select-none h-7">
+          <div className="flex items-center gap-2">
+            <div className="w-4 h-4 rounded bg-indigo-500/10 flex items-center justify-center ring-1 ring-indigo-500/20 shadow-sm">
+              <Terminal className="w-2.5 h-2.5 text-indigo-400" />
             </div>
-            {!isMinimized && (
-              <span className="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
-              </span>
-            )}
-          </div>
-          <div className="flex flex-col">
-            <span className="uppercase tracking-[0.15em] font-black text-[10px] text-foreground/90 leading-none">
+            <span className="uppercase tracking-widest font-bold text-[9px] text-zinc-400/80 leading-none">
               {title}
             </span>
-            {!isMinimized && (
-              <span className="text-[8px] text-muted-foreground/60 font-medium tracking-tight mt-0.5">
-                ACTIVE SESSION ● SYSTEM_READY
-              </span>
-            )}
           </div>
 
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 ml-auto">
             <button
               onClick={() => setIsMinimized(!isMinimized)}
-              className="p-1 hover:bg-white/10 rounded transition-colors text-white/70 hover:text-white"
+              className="w-5 h-5 flex items-center justify-center hover:bg-white/5 rounded-sm transition-colors text-zinc-500 hover:text-zinc-300"
               title={isMinimized ? "Expand Terminal" : "Minimize Terminal"}
             >
-              {isMinimized ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              {isMinimized ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
             </button>
             <button
               onClick={onClose}
-              className="p-1 hover:bg-white/10 rounded transition-colors text-white/70 hover:text-white hover:bg-red-500/20 hover:text-red-400"
+              className="w-5 h-5 flex items-center justify-center hover:bg-red-500/10 rounded-sm transition-colors text-zinc-500 hover:text-red-400"
               title="Close Terminal"
             >
-              <X className="w-3.5 h-3.5" />
+              <X className="w-3 h-3" />
             </button>
           </div>
         </div>
 
         <div
           ref={scrollRef}
-          className="flex-1 overflow-hidden relative bg-black custom-scrollbar"
+          className="flex-1 overflow-hidden relative bg-zinc-950/50 custom-scrollbar"
         >
           <XTerminal height={isMinimized ? 0 : height} ref={xtermRef} />
         </div>
